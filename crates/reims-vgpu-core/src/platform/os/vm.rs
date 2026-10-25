@@ -56,10 +56,12 @@ impl BitOr for VmProt {
 /// Mach VM on the current task (`mach_task_self()`). The fake is a model over real memory
 /// (`testkit::vm`).
 pub trait HostVm: Send + Sync {
-    /// `vm_page_size` (16 KiB on the suite's host).
+    /// The host's `vm_page_size` (16 KiB on arm64 macOS, 4 KiB on x86-64 Linux and Windows).
+    /// Guest page numbers count `APV_PAGE_SIZE` pages, which may be larger.
     fn page_size(&self) -> u64;
-    /// `vm_page_shift` (14 on the suite's host): core reads it as its own global (and the other
-    /// page-number shifts).
+    /// The host's `vm_page_shift` (14 on arm64 macOS, 12 on x86-64). Guest page numbers use
+    /// `APV_PAGE_SHIFT`; core uses the host page only to truncate host addresses as Mach does
+    /// (`MappingTask::unmap_memory_at_virtual_offset`).
     fn page_shift(&self) -> u32;
     /// `mach_vm_allocate(task, &a, len, VM_FLAGS_ANYWHERE)`: a fresh zero-filled range.
     fn allocate_anywhere(&self, len: u64) -> Result<HostAddr, KernReturn>;

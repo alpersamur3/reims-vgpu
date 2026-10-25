@@ -40,7 +40,7 @@ enum Built {
 }
 
 /// The guest memory a page table of `depth` levels covers: [`ENTRIES`] entries a level, of guest
-/// pages (4096 of 16 KiB, 1024 of 4 KiB on x86-64).
+/// pages (4096 of 16 KiB, 1024 of 4 KiB with `cfg(apv_guest_4k)`).
 ///
 /// [`ENTRIES`]: crate::memory::page_table::ENTRIES
 pub(super) fn page_table_coverage(depth: u32) -> u64 {

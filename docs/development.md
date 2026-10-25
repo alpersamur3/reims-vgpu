@@ -101,7 +101,8 @@ cargo xtask smoke          # a guest linked with the library as QEMU links it (m
 | `check` | `testkit`, `header --check`, rustfmt, clippy and the tests ([architecture.md](architecture.md) 13.1); `--no-cargo` skips the cargo steps |
 
 `cargo xtask check` tests with every feature but `reims-vgpu-c/vulkan`, which puts the C API on the
-Vulkan platform, and lints with every feature too. On a Mac it also clippy-checks the Linux target,
+Vulkan platform, and `guest-arm64`, which switches an x86-64 build's guest to arm64, and lints with
+every feature too. On a Mac it also clippy-checks the Linux target,
 and, where Rosetta is installed, runs core's tests as `x86_64-apple-darwin`.
 
 #### Dist
@@ -190,6 +191,11 @@ Set in `Cargo.toml` (architecture 2.3):
   SDL3's window on macOS, which `REIMS_VGPU_WINDOW_IMPL=sdl` opens in place of AppKit's. Without it
   the macOS library has no SDL.
 - `reims-vgpu-window/sdl-no-link`: SDL left unbuilt, for the Linux target's clippy on a Mac.
+- `reims-vgpu-core/guest-arm64` (forwarded by `reims-vgpu` and `reims-vgpu-c`): the guest is arm64,
+  with 16 KiB pages, on an x86-64 build too (an arm64 guest under TCG). It switches the guest
+  rather than adding to it, so `--all-features` on x86-64 selects the arm64 guest; core's tests run
+  that way with `--features reims-vgpu-core/testkit,reims-vgpu-core/guest-arm64` on an x86-64
+  Linux or Rosetta host.
 - `reims-vgpu-core/testkit`: `core::testkit` for other crates' tests.
 - `reims-vgpu/testkit`: the same, through the public crate, and each handle's core object.
 

@@ -19,6 +19,8 @@ testkit = ["reims-vgpu-core/testkit"]
 # own `vulkan` feature makes its platform. Off by default on macOS, where the Metal platform is the
 # product; on Linux the library builds only with it (`lib.rs`).
 vulkan = ["dep:reims-vgpu-vulkan"]
+# Core's `guest-arm64`: the guest is arm64, with 16 KiB pages, on any build.
+guest-arm64 = ["reims-vgpu-core/guest-arm64"]
 
 [dependencies]
 reims-vgpu-core.workspace = true

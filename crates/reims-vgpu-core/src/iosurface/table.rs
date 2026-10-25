@@ -2,7 +2,7 @@
 //! three commands that act on a slot, with the teardown of every slot.
 //!
 //! A mapping id `n` names descriptor `n % per_page` of descriptor page `n / per_page`, where
-//! `per_page` is the VM page size over the form's descriptor size. The page's guest address is
+//! `per_page` is the guest page size (`APV_PAGE_SIZE`) over the form's descriptor size. The page's guest address is
 //! the descriptor table's entry for it, read and mapped the first time a map reaches it and
 //! cached until the table is replaced.
 
@@ -163,7 +163,7 @@ impl<P: Platform> HostDeviceCore<P> {
     ) -> Result<GuestPtr, IoReturn> {
         let index = page_index.to_usize();
         let Some(&cached) = st.pages.get(index) else {
-            // Past the page slots: a VM page above 16 KiB.
+            // Past the page slots: a guest page above 16 KiB, which no build has.
             crate::fatal!(DeathKind::PageIndex);
         };
         if let Some(page) = cached {
@@ -249,7 +249,7 @@ impl<P: Platform> HostDeviceCore<P> {
             return status;
         }
         // The cause of a refusal has its own line.
-        let Some(spec) = surface_spec(&*self.platform, descriptor, slot) else {
+        let Some(spec) = surface_spec(descriptor, slot) else {
             log::debug!("map: surface {mapping_id}'s properties were refused");
             return IoReturn::NoMemory;
         };

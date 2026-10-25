@@ -180,7 +180,7 @@ mod tests {
     use crate::testkit::calllog::Arg;
 
     /// The root table must be mapped, and the page count at most a page of entries squared,
-    /// 4096 × 4096 on a 16 KiB host.
+    /// 4096 × 4096 on 16 KiB guest pages.
     #[test]
     fn root_and_size_refusals() {
         let r = rig();
@@ -214,7 +214,7 @@ mod tests {
         assert!(slot.pages.is_empty() && slot.surface.is_none());
     }
 
-    /// Two table levels (one page more than a page of entries, 4097 pages on a 16 KiB host):
+    /// Two table levels (one page more than a page of entries, 4097 pages on 16 KiB guest pages):
     /// the root entries must be valid tables (BadArgument), the tables mapped and their entries
     /// valid pages (NoMemory).
     #[test]
@@ -243,7 +243,7 @@ mod tests {
         let Arg::Val(text) = &r.created()[0] else {
             panic!()
         };
-        // 67125248 on a 16 KiB host.
+        // 67125248 on 16 KiB guest pages.
         assert!(text.contains(&format!("alloc_size: {}", (n + 1) * PAGE)));
         // Refusals, on a fresh id each.
         r.ram.write_u32(ROOT + 4, pte(L2B, false));

@@ -28,12 +28,13 @@ use crate::testkit::platform::FakePlatform;
 
 pub(super) type Dev = IoSurfaceHostDevice<FakePlatform>;
 
-/// The host's VM page, which the mapper's tables count.
-pub(super) const PAGE: u64 = crate::testkit::guest_ram::PAGE_SIZE;
+/// The guest page, which the mapper's tables count (the fake VM's host page may be smaller).
+pub(super) const PAGE: u64 = crate::guest::records::APV_PAGE_SIZE;
 /// The descriptor pages, from `DPAGE` on: 16 KiB, 16 second-form or 32 first-form descriptors,
-/// one page on a 16 KiB host and four on a 4 KiB one.
+/// one page on 16 KiB guest pages and four on 4 KiB ones.
 pub(super) const DESCRIPTOR_PAGES: u64 = 0x4000 / PAGE;
-/// Guest RAM at 1 MiB: 16 pages on a 16 KiB host, and ten pages from `SURF` on on every host.
+/// Guest RAM at 1 MiB: 16 pages on 16 KiB guest pages, and ten pages from `SURF` on on every
+/// guest.
 pub(super) const B: u64 = 0x10_0000;
 pub(super) const RAM_PAGES: u64 = 15 + DESCRIPTOR_PAGES;
 pub(super) const RING: u64 = B;
@@ -106,7 +107,7 @@ pub(super) fn rig_raising(on_raise: impl Fn(u32) + Send + Sync + 'static) -> Rig
 
 /// A page-table entry naming `pa`.
 pub(super) fn pte(pa: u64, table: bool) -> u32 {
-    (((pa >> crate::testkit::vm::PAGE_SHIFT) as u32) << 2) | 1 | if table { 2 } else { 0 }
+    (((pa >> crate::guest::records::APV_PAGE_SHIFT) as u32) << 2) | 1 | if table { 2 } else { 0 }
 }
 
 /// A valid second-form descriptor of `pages` guest pages whose root table is at `root`.

@@ -97,7 +97,8 @@ pub enum RaiseKind {
     NoBufferMapping,
     /// Metal made no buffer over task pages.
     NoBuffer,
-    /// A reply's length outside 16 to a guest page less one (0x3fff, 0xfff on x86-64) bytes.
+    /// A reply's length outside 16 to a guest page less one (0x3fff, 0xfff on 4 KiB guest pages)
+    /// bytes.
     ReplyLength,
 }
 

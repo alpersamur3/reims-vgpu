@@ -22,6 +22,9 @@ macos-sdl = ["reims-vgpu/macos-sdl"]
 # `VulkanPlatform` in place of `MetalPlatform`. Off by default: the Metal platform is the product.
 # `cargo xtask dist --platform vulkan` builds the dist tree with it.
 vulkan = ["reims-vgpu/vulkan"]
+# Core's `guest-arm64` (reims-vgpu's): the library serves an arm64 guest with 16 KiB pages on an
+# x86-64 host.
+guest-arm64 = ["reims-vgpu/guest-arm64"]
 
 [dependencies]
 reims-vgpu.workspace = true

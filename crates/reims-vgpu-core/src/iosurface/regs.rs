@@ -169,7 +169,7 @@ impl<P: Platform> HostDeviceCore<P> {
     /// A size needs a base, and is stored before the ring is mapped: an overflowing length or a
     /// refused mapping leaves the register at the new size and the ring at the old one. The
     /// mapping asserts a whole number of guest pages: a size that is not a multiple of 1024
-    /// commands (256 on x86-64) is host death.
+    /// commands (256 on 4 KiB guest pages) is host death.
     pub(super) fn set_ring_size(&self, st: &mut QueueState<P>, size: u64) {
         let ring_base = self.regs.ring_base.load(Ordering::SeqCst);
         if size == 0 || ring_base == 0 {
@@ -273,8 +273,8 @@ impl<P: Platform> HostDeviceCore<P> {
 }
 
 /// Whether one page of descriptor table, `page / 4` entries, each naming a page of second-form
-/// descriptors (`page / 0x400`), reaches every mapping id. On 16 KiB pages it holds 65,536; on
-/// x86-64's 4 KiB ones 4,096, short of the 8192 ids, where the first form's 0x200 bytes give
+/// descriptors (`page / 0x400`), reaches every mapping id. On 16 KiB guest pages it holds 65,536;
+/// on 4 KiB guest pages 4,096, short of the 8192 ids, where the first form's 0x200 bytes give
 /// exactly 8192. The guest's mapper takes the second form whenever it is offered, and then
 /// refuses to start when its own table, sized the same way, holds fewer than 8192 mappings: a
 /// 4 KiB-page guest starts only on the first form.

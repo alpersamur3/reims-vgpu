@@ -93,7 +93,7 @@ use crate::tasks::{
     Unsupported,
 };
 
-/// The guest page: 16 KiB (4 KiB on x86-64).
+/// The guest page: 16 KiB (4 KiB with `cfg(apv_guest_4k)`).
 const PAGE: u64 = APV_PAGE_SIZE;
 /// The offset of an address within its page.
 const PAGE_MASK: u64 = PAGE - 1;

@@ -13,8 +13,8 @@
 
 use crate::guest::records::APV_PAGE_SIZE;
 
-/// The page's length: the guest display maps one guest page from the page's number, 16 KiB on
-/// arm64 and 4 KiB on x86-64. Every field ends by 0xfd8, inside either. The colour matrices at the
+/// The page's length: the guest display maps one guest page from the page's number, 16 KiB, and
+/// 4 KiB with `cfg(apv_guest_4k)`. Every field ends by 0xfd8, inside either. The colour matrices at the
 /// guest's index reach 0x3a10 ([`color_matrix`]): inside a 16 KiB page, and past a 4 KiB one
 /// from index 31, where each access to them is checked ([`color_matrix_in_page`]).
 pub const PAGE_LENGTH: u64 = APV_PAGE_SIZE;
@@ -188,8 +188,8 @@ pub fn color_matrix(matrix: u8, row: u8, col: u8) -> u64 {
 }
 
 /// Whether the `width` bytes at `colorMatrices[matrix][row][col]` lie inside the page. Always on
-/// arm64, where matrix 255 ends at 0x3a10; on x86-64 every access of matrices 0-30 (matrix 30
-/// ends at 0xfe0), and of matrix 31 those that end by 0x1000 (its rows 0 and 1).
+/// 16 KiB guest pages, where matrix 255 ends at 0x3a10; on 4 KiB ones every access of matrices
+/// 0-30 (matrix 30 ends at 0xfe0), and of matrix 31 those that end by 0x1000 (its rows 0 and 1).
 #[inline]
 pub fn color_matrix_in_page(matrix: u8, row: u8, col: u8, width: u64) -> bool {
     color_matrix(matrix, row, col)
@@ -223,9 +223,9 @@ mod tests {
         assert_eq!(GUEST_ICC_PROFILE_LENGTH, 0xfd0);
         assert_eq!(MODE_ENTRY_SIZE, 16);
         assert_eq!(PAGE_LENGTH, crate::guest::records::APV_PAGE_SIZE);
-        #[cfg(not(target_arch = "x86_64"))]
+        #[cfg(not(apv_guest_4k))]
         assert_eq!(PAGE_LENGTH, 0x4000);
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(apv_guest_4k)]
         assert_eq!(PAGE_LENGTH, 0x1000);
     }
 
@@ -265,7 +265,7 @@ mod tests {
     }
 
     /// A 16 KiB page holds every matrix: every access is inside
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(not(apv_guest_4k))]
     #[test]
     fn every_color_matrix_is_in_a_16k_page() {
         assert!(color_matrix(255, 2, 3) + 4 <= PAGE_LENGTH);
@@ -277,7 +277,7 @@ mod tests {
 
     /// A 4 KiB page holds matrices 0-30 whole and the first 32 bytes of matrix 31 (its rows 0
     /// and 1); every access past those is outside
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(apv_guest_4k)]
     #[test]
     fn a_4k_page_ends_in_matrix_31() {
         assert_eq!(color_matrix(30, 2, 3) + 4, 0xfe0);
