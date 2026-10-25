@@ -2,7 +2,8 @@
 //! the window's swapchain, on either OS (`swapchain.rs`), and each OS's window asks the sink for
 //! it its own way (`linux.rs`, `macos.rs`).
 
-#[cfg(target_os = "linux")]
+// Windows's window keeps Linux's sink shape (reims-vgpu-window's native/windows.rs).
+#[cfg(any(target_os = "linux", windows))]
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;

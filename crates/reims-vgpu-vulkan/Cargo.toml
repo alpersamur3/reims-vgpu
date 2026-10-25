@@ -29,6 +29,16 @@ reims-vgpu-metal.workspace = true
 [target.'cfg(target_os = "linux")'.dependencies]
 libc.workspace = true
 
+# Win32 virtual memory, the clocks and the system's page size (os/windows).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Memory",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_System_WindowsProgramming",
+] }
+
 # The hashes of the metallibs' sources, which a metallib built elsewhere is checked by (build.rs).
 [build-dependencies]
 sha2.workspace = true

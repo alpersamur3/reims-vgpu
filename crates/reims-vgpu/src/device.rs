@@ -19,7 +19,10 @@
 //! core handle.
 
 use std::any::Any;
+#[cfg(unix)]
 use std::os::fd::OwnedFd;
+#[cfg(windows)]
+use std::os::windows::io::OwnedHandle;
 use std::sync::Arc;
 
 use reims_vgpu_core::device::Device as CoreDevice;
@@ -52,12 +55,20 @@ pub struct MemoryMap {
     files: Vec<Option<MemoryFile>>,
 }
 
+/// The OS's handle to a range's file: a descriptor on unix, a handle on Windows.
+#[cfg(unix)]
+type HostFile = OwnedFd;
+/// The OS's handle to a range's file: a descriptor on unix, a handle on Windows.
+#[cfg(windows)]
+type HostFile = OwnedHandle;
+
 /// The file behind one range of a [`MemoryMap`]: the range's host memory is a shared mapping
-/// (`MAP_SHARED`) of `fd` from byte `offset`.
+/// (`MAP_SHARED`) of `fd` from byte `offset`. On Windows `fd` is a section's handle
+/// (`CreateFileMappingW`), which no range carries yet.
 #[derive(Clone, Debug)]
 pub struct MemoryFile {
     /// The file, held open while any map or device holds it.
-    pub fd: Arc<OwnedFd>,
+    pub fd: Arc<HostFile>,
     /// The file offset of the range's first byte, a multiple of the host's page size.
     pub offset: u64,
 }
