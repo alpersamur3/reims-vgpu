@@ -3,6 +3,9 @@
 //! reads of a surface beyond core's trait, written against it (`surface.rs`).
 //!
 //! - **macOS** (`os/macos.rs`): the metal crate's services, as they are, and IOSurface itself.
+//! - **Windows** (`os/windows.rs`): the clocks (interrupt time, precise system time), threads,
+//!   a host VM over Win32 virtual memory whose ranges lie at or above 4 GiB, and no views or
+//!   IOSurface stand-ins yet (ASoftware's port, its first step).
 //! - **Linux** (`os/linux.rs`): the clocks (`CLOCK_BOOTTIME`, `CLOCK_REALTIME`), threads, a host
 //!   VM over `mmap` that makes views of the guest's pages by mapping their files (the backing
 //!   table), and IOSurface's stand-in over that memory.
@@ -18,15 +21,27 @@ mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
 mod surface;
+#[cfg(windows)]
+mod windows;
 mod wsi;
 
 #[cfg(target_os = "linux")]
 use linux as host_os;
 #[cfg(target_os = "macos")]
 use macos as host_os;
+#[cfg(windows)]
+use windows as host_os;
 
-use std::os::fd::OwnedFd;
 use std::sync::Arc;
+
+/// The OS's handle to a file whose bytes back a range of the guest's RAM: a file descriptor on
+/// unix, a handle (a section's, `CreateFileMappingW`) on Windows.
+#[cfg(unix)]
+pub type HostFile = std::os::fd::OwnedFd;
+/// The OS's handle to a file whose bytes back a range of the guest's RAM: a file descriptor on
+/// unix, a handle (a section's, `CreateFileMappingW`) on Windows.
+#[cfg(windows)]
+pub type HostFile = std::os::windows::io::OwnedHandle;
 
 pub(crate) use host_os::{
     Drawables, METAL_LEVEL, TWINS_READ_ONLY, allocate_aliasable, allocate_zeros, dma_buf_refusal,
@@ -58,7 +73,7 @@ pub struct GuestRamFile {
     /// The range's length in bytes.
     pub length: u64,
     /// The file.
-    pub fd: Arc<OwnedFd>,
+    pub fd: Arc<HostFile>,
     /// The file offset of the range's first byte.
     pub offset: u64,
 }

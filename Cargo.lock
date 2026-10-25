@@ -481,6 +481,7 @@ dependencies = [
  "reims-vgpu",
  "reims-vgpu-core",
  "tikv-jemallocator",
+ "windows-sys",
 ]
 
 [[package]]
@@ -521,6 +522,7 @@ dependencies = [
  "reims-vgpu-core",
  "reims-vgpu-metal",
  "sha2",
+ "windows-sys",
 ]
 
 [[package]]

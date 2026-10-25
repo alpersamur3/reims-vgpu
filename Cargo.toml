@@ -109,3 +109,10 @@ debug-assertions = true
 # suite's `checked` pass leaves them off, and release has none at all (D36).
 [profile.checked.package.objc2]
 debug-assertions = false
+
+# Windows GNU port (ASoftware, M3a.1): metal2vulkan at the same commit as above, from a local
+# working copy carrying the Windows changes (host page size, no unix-only paths).
+[patch.'https://github.com/steelbrain/metal2vulkan']
+metal2vulkan-runtime = { path = "../metal2vulkan-win/crates/metal2vulkan-runtime" }
+metal2vulkan = { path = "../metal2vulkan-win/crates/metal2vulkan" }
+metal2vulkan-air = { path = "../metal2vulkan-win/crates/metal2vulkan-air" }

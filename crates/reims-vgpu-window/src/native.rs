@@ -10,11 +10,15 @@
 //!   (`reims-vgpu.ui`) but for the render thread, which draws into the window's Vulkan swapchain;
 //!   the window's shell and cursor are SDL's shared ones (`sdl`), with Linux's side in
 //!   `native/linux/sdl.rs`.
+//! - **Windows** (`native/windows.rs`): no window yet; a host reads a display's frames through a
+//!   frame target. Linux's [`FrameSink`] shape, so a later Win32 window takes the same sink.
 
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(windows)]
+mod windows;
 
 #[cfg(target_os = "linux")]
 pub use linux::FrameSink;
@@ -32,3 +36,7 @@ pub(crate) use macos::{
     key_input_captured, launched, monitored_events, open, quit_requested, release_key_input,
     screens_changed,
 };
+#[cfg(windows)]
+pub use windows::FrameSink;
+#[cfg(windows)]
+pub(crate) use windows::{Surface, close, cursor_changed, guest_mode_changed, host_screens, open};

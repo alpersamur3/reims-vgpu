@@ -1,3 +1,5 @@
+use std::mem::MaybeUninit;
+
 use reims_vgpu_core::guest::records::APV_PAGE_SHIFT;
 use reims_vgpu_core::testkit::GuestRam;
 use reims_vgpu_core::testkit::host::FakeHost;

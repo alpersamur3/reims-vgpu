@@ -13,7 +13,7 @@
 //!
 //! **By OS.** On macOS the default platform is `MetalPlatform`, the product. On Linux the library
 //! is the Vulkan platform's: it builds only with the `vulkan` feature, and `VulkanPlatform` is the
-//! default.
+//! default. So on Windows (ASoftware's port), whose window opens nothing yet.
 //!
 //! Behaviour is core's; this crate adds none. Its closures are called synchronously on the
 //! thread core calls them on, in core's order, which is the order of VM-memory operations and
@@ -29,8 +29,10 @@
 // limit of 128 (E0275), as the C crate's does.
 #![recursion_limit = "256"]
 
-#[cfg(all(target_os = "linux", not(feature = "vulkan")))]
-compile_error!("on Linux the library is the Vulkan platform's: build it with the `vulkan` feature");
+#[cfg(all(not(target_os = "macos"), not(feature = "vulkan")))]
+compile_error!(
+    "off macOS (Linux, Windows) the library is the Vulkan platform's: build it with the `vulkan` feature"
+);
 
 mod device;
 mod display;
@@ -69,6 +71,9 @@ pub use reims_vgpu_vulkan::VulkanPlatform;
 pub type DefaultPlatform = MetalPlatform;
 /// The platform every handle is made on by default: `VulkanPlatform` on Linux.
 #[cfg(target_os = "linux")]
+pub type DefaultPlatform = VulkanPlatform;
+/// The platform every handle is made on by default: `VulkanPlatform` on Windows.
+#[cfg(windows)]
 pub type DefaultPlatform = VulkanPlatform;
 pub use reims_vgpu_window::{
     BUTTON_EXTRA, BUTTON_LEFT, BUTTON_MIDDLE, BUTTON_RIGHT, BUTTON_SIDE, CloseFn, KeyFn,
