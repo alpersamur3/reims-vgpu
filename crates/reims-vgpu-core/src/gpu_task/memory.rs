@@ -34,7 +34,7 @@ use crate::resources::host::MappedAddress;
 use crate::rt::Hold;
 use crate::{fatal, fatal_unless};
 
-/// The guest page: 16 KiB (4 KiB on x86-64).
+/// The guest page: 16 KiB (4 KiB with `cfg(apv_guest_4k)`).
 pub(super) const PAGE: u64 = APV_PAGE_SIZE;
 /// The in-page mask.
 pub(super) const PAGE_MASK: u64 = APV_PAGE_MASK;

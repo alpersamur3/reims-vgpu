@@ -1827,10 +1827,10 @@ mod color_matrix_late_read {
     }
 }
 
-/// On x86-64 the page is 4 KiB: matrices 0-30 lie inside it, matrix 31's first two rows end at its
+/// On 4 KiB guest pages the page is 4 KiB: matrices 0-30 lie inside it, matrix 31's first two rows end at its
 /// end, and every access past it ends the process there, before it is made. Each test sets only
 /// bytes inside the page.
-#[cfg(target_arch = "x86_64")]
+#[cfg(apv_guest_4k)]
 mod color_matrix_outside_page {
     use super::*;
 

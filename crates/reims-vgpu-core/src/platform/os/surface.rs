@@ -104,7 +104,8 @@ pub struct SurfaceSpec {
     /// `kIOSurfaceClientDirection` (private key): `Some(2)` for a read-only mapping, else absent.
     pub client_direction: Option<u32>,
     /// `kIOSurfaceClientAddressRanges` (private key): an `NSData` of `PGPhysicalMemoryRange_t`, one
-    /// per mapped page, each `{host VA, vm_page_size}`; absent for a host-only surface.
+    /// per mapped guest page, each `{host VA, the guest page size (APV_PAGE_SIZE)}`; absent for a
+    /// host-only surface.
     pub client_address_ranges: Option<Vec<PhysicalMemoryRange>>,
 }
 

@@ -1,6 +1,6 @@
 //! A task's guest page table, walked at use time: 1-3 levels of one guest page of `u32` entries
-//! each ([`ENTRIES`]: 4096, 1024 on x86-64), each a guest page number with the writable bit on
-//! top.
+//! each ([`ENTRIES`]: 4096, 1024 on 4 KiB guest pages), each a guest page number with the
+//! writable bit on top.
 
 use std::sync::Arc;
 
@@ -75,7 +75,7 @@ struct Level {
 
 /// A table's index bits: a table is one guest page of `u32` entries.
 pub(crate) const INDEX_BITS: u32 = APV_PAGE_SHIFT.wrapping_sub(2);
-/// Entries per table: 4096 (1024 on x86-64).
+/// Entries per table: 4096 (1024 on 4 KiB guest pages).
 pub(crate) const ENTRIES: u64 = 1_u64.wrapping_shl(INDEX_BITS);
 
 impl Level {

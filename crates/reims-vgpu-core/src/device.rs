@@ -1043,8 +1043,9 @@ impl<P: Platform> DeviceCore<P> {
         let mtl_caps = mtl_device.caps();
         let name = mtl_caps.name.as_deref();
         log::info!(
-            "device starting on Metal device {}",
-            name.unwrap_or("(unnamed)")
+            "device starting on Metal device {}, guest pages of {} KiB",
+            name.unwrap_or("(unnamed)"),
+            crate::guest::records::APV_PAGE_SIZE / 1024
         );
         let paravirtual_device = name.is_some_and(|n| n.contains("Apple Paravirtual device"));
         let fifo_queue = SerialQueue::new(p.threads(), "reims-vgpu.fifo-control");

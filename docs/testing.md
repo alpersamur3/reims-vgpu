@@ -3410,7 +3410,8 @@ list set), 0x1224 read 16.
 ### 6.23 The IOSurface host device
 
 `iosurface/`. `rvg_iosurface_device_create` needs a memory map. Descriptors per
-page = vm_page_size / 0x200 (32); page-table pages = vm_page_size / 4 (4096).
+page = the guest page (`APV_PAGE_SIZE`) / 0x200 (32); page-table entries per page = the guest
+page / 4 (4096). The host VM's page may be smaller.
 The last instance created in the process is global (section 3.2).
 
 64-bit registers:
@@ -3422,7 +3423,7 @@ The last instance created in the process is global (section 3.2).
 | 0x1010 | descriptor table base; tears down every surface; maps one page | descriptor base |
 | 0x1018 | write counter; wakes the ring | write counter |
 | 0x1020 | read counter, only while no ring is mapped | read counter |
-| 0x1028 | | the features offered: 1 (v2 descriptors) where one page of table holds every mapping id in v2 descriptors, on 16 KiB pages; 0 on x86-64's 4 KiB pages, where it holds 4096 of the 8192 (v1 holds exactly 8192). The guest's mapper takes v2 whenever offered, and refuses to start when its table holds fewer than 8192 mappings |
+| 0x1028 | | the features offered: 1 (v2 descriptors) where one page of table holds every mapping id in v2 descriptors, on 16 KiB guest pages; 0 on 4 KiB guest pages (an x86-64 build without `guest-arm64`), where it holds 4096 of the 8192 (v1 holds exactly 8192). The guest's mapper takes v2 whenever offered, and refuses to start when its table holds fewer than 8192 mappings |
 | 0x1030 | descriptor enable: bit 0 selects 0x400-byte v2 descriptors, else 0x200-byte v1; clears the descriptor base | enable |
 | other | ignored | UINT64_MAX (0xffffffff through QEMU) |
 

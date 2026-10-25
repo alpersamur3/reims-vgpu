@@ -71,7 +71,8 @@ pub enum DeathKind {
     PageTableRead,
     /// The test pattern written into a surface.
     PatternWrite,
-    /// A descriptor page index past the device's page slots (a VM page above 16 KiB).
+    /// A descriptor page index past the device's page slots (a guest page above 16 KiB, which
+    /// no build has).
     PageIndex,
     /// Interrupt 0 raised with no interrupt block.
     NoInterrupt,

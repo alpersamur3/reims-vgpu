@@ -162,7 +162,8 @@ the 21 checks this one keeps:
 - the mapper is 106b:eeef, class 0x0880, with no interrupt pin, an MSI
   capability, and BAR 0 alone (64 KiB of 32-bit memory; no other BAR, no
   ROM); its command register takes memory space and bus mastering;
-- 0x1028 reads 0 on this 4 KiB host; an 8-byte read past the registers
+- 0x1028 reads 0 with 4 KiB guest pages (an x86-64 build without
+  `guest-arm64`); an 8-byte read past the registers
   reads all ones; ring and descriptor-table bases above 4 GiB, written in 8
   bytes, read back whole, and a 4-byte read gives the low half;
 - with a 256-command ring above 4 GiB, an unknown command completes with
@@ -282,7 +283,8 @@ How it uses the API:
   it) and reads the start back from the library, since vCPUs' hooks may reach
   the BQL in another order than their writes reached the library. It looks the
   start up in the system memory's flat view, in the library's pages
-  (`APV_PAGE_SHIFT`: 4 KiB on an x86-64 host, 16 KiB otherwise). Where the
+  (`APV_PAGE_SHIFT`: 4 KiB on an x86-64 build without `guest-arm64`, 16 KiB
+  otherwise). Where the
   machine's RAM is there, BAR 2 shows the run of it from the start, up to
   64 MiB, at the BAR's offset 0: only RAM the guest reaches at those addresses
   then, so the window ends where SMRAM, a ROM or a device's region lies over
@@ -370,8 +372,8 @@ How it uses the API:
   `20261017-022711` had the same 11 deaths, a WindowServer crash and none
   of metalwin's 60 frames. So the version cannot tell the drivers apart,
   and the mapper can: Apple's x86-64 driver runs in process, stock or
-  patched, and Apple's arm64 one, ported, isolated. On an x86-64 host the IOSurface
-  device offers only the first descriptor form at 0x1028
+  patched, and Apple's arm64 one, ported, isolated. A library with 4 KiB guest pages
+  (an x86-64 build without `guest-arm64`) offers only the first descriptor form at 0x1028
   ([testing.md](testing.md) 6.23), which the mapper driver needs on 4 KiB
   pages. A VM with no `apple-gfx-iosurface-pci` runs every task in process
   and is told no argument buffers, as before the device existed.

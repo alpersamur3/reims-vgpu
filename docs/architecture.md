@@ -171,7 +171,10 @@ reims-vgpu-vulkan  <-  reims-vgpu, reims-vgpu-c  (their `vulkan` feature: off by
 
 - **Core** depends on `parking_lot`, `zerocopy`, `bitflags` and `log` only (`loom` under
   `cfg(loom)`). Its `testkit` feature exposes `core::testkit` outside core's own tests; only
-  dev-dependencies enable it, and `cargo xtask testkit` checks that (D50).
+  dev-dependencies enable it, and `cargo xtask testkit` checks that (D50). Its `guest-arm64`
+  feature, passed on by `reims-vgpu` and `reims-vgpu-c`, makes the guest arm64 with 16 KiB pages
+  on any build: its build script sets `cfg(apv_guest_4k)` (4 KiB guest pages) only for an x86-64
+  build without it.
 - **Metal** implements `Platform` and compiles the library's shaders (4.7). It holds every
   `#[link]` but the window crate's two, and every call into Metal, Foundation or IOSurface runs in
   its message layer (4.6), the API's own few included. It depends on core for its traits and value
@@ -1157,8 +1160,9 @@ from their `config.plist`). Before
 BAR 2 the kernel drew to the same pages directly.
 
 **Pages.** The driver writes 0x1210 in 4 KiB pages and rounds the length up to 4 KiB, the
-x86-64 guest's pages. A library built for x86-64 counts 0x1210 in those pages and takes a length
-of whole ones (`APV_PAGE_SHIFT`). One built for arm64 counts 16 KiB pages and refuses a length
+x86-64 guest's pages. A library with 4 KiB guest pages (built for x86-64 without `guest-arm64`)
+counts 0x1210 in those pages and takes a length of whole ones (`APV_PAGE_SHIFT`). One built for
+arm64, or with `guest-arm64`, counts 16 KiB pages and refuses a length
 that is not a 16 KiB multiple (testing.md 6.22), so there it would map a range other than the
 driver's buffer, or none; that is read from the code. On a Linux host, x86-64 macOS guests boot
 on `apple-gfx-pci` with this ROM, as `cargo xtask dist` builds it, and a library built for x86-64
@@ -1231,9 +1235,10 @@ header is cbindgen's output, 11.2), `cargo fmt --check`, `clippy -D warnings` ov
 once with every feature and once with the tested features without the default ones, `cargo
 nextest run --workspace --no-fail-fast` (each test in its own process) with the tested features,
 and the doc-tests, which nextest does not run (`cargo test --workspace --doc`). The tested
-features are every feature but the C API's `vulkan` (`TESTED_FEATURES` in `xtask/src/main.rs`):
-it makes the C API's platform the Vulkan one (11.1), and the pins and the C harness (13.5) drive
-the product's. On Linux, where the Vulkan platform is the only one, the C API's `vulkan` is among
+features are every feature but the C API's `vulkan` and core's `guest-arm64` (`TESTED_FEATURES`
+in `xtask/src/main.rs`): the first makes the C API's platform the Vulkan one (11.1), and the pins
+and the C harness (13.5) drive the product's; the second switches an x86-64 build's guest to
+arm64. On Linux, where the Vulkan platform is the only one, the C API's `vulkan` is among
 them. On a Mac the check also runs clippy for `x86_64-unknown-linux-gnu`, which type-checks every
 Linux file with SDL left unbuilt, and, where Rosetta runs x86-64 code, core's tests as
 `x86_64-apple-darwin`, for the x86-64 guest's 4 KiB pages and instructions.

@@ -32,7 +32,8 @@ pub(crate) const NODE_STAMP_INDEX: u64 = 0xc;
 pub(crate) const NODE_RUNNING: u64 = 0xe;
 pub(crate) const NODE_PAGE_LIST_PAGE: u64 = 0x10;
 
-/// The page list's entries: one guest page of `u32` page numbers (4096, 1024 on x86-64).
+/// The page list's entries: one guest page of `u32` page numbers (4096, 1024 on 4 KiB guest
+/// pages).
 pub(crate) const PAGE_LIST_ENTRIES: u64 = APV_PAGE_SIZE.wrapping_shr(2);
 
 /// A FIFO's ring, by kind.

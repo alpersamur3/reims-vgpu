@@ -39,9 +39,10 @@
 //!   the call (`handler_releases_the_display::cursor_show_handler`).
 
 /// Dies unless the `width` bytes at `colorMatrices[matrix][row][col]` lie inside the page
-/// ([`page::color_matrix_in_page`](crate::display::page::color_matrix_in_page)): on x86-64 an
-/// access past the 4 KiB page ends the process at that access, before it is made.
-#[cfg(target_arch = "x86_64")]
+/// ([`page::color_matrix_in_page`](crate::display::page::color_matrix_in_page)): on 4 KiB guest
+/// pages (`cfg(apv_guest_4k)`) an access past the page ends the process at that access, before
+/// it is made.
+#[cfg(apv_guest_4k)]
 macro_rules! color_matrix_access {
     ($matrix:expr, $row:expr, $col:expr, $width:expr) => {
         $crate::fatal_unless!(
@@ -51,8 +52,8 @@ macro_rules! color_matrix_access {
     };
 }
 
-/// Nothing on arm64: the 16 KiB page holds every matrix, so no access leaves it.
-#[cfg(not(target_arch = "x86_64"))]
+/// Nothing on 16 KiB guest pages: the page holds every matrix, so no access leaves it.
+#[cfg(not(apv_guest_4k))]
 macro_rules! color_matrix_access {
     ($matrix:expr, $row:expr, $col:expr, $width:expr) => {};
 }
@@ -222,8 +223,8 @@ pub enum DeathKind {
     /// A restore finished that was not begun.
     FinishRestoreUnexpected,
     /// A colour-matrix access past the page: the guest's matrix index is past the matrices a
-    /// 4 KiB page holds. x86-64 only: a 16 KiB page holds every index.
-    #[cfg(target_arch = "x86_64")]
+    /// 4 KiB page holds. 4 KiB guest pages only: a 16 KiB page holds every index.
+    #[cfg(apv_guest_4k)]
     ColorMatrixOutsidePage,
 }
 
@@ -253,7 +254,7 @@ impl DeathKind {
             DeathKind::UnpauseRunning => "guest_display.unpause.running",
             DeathKind::WillRestoreTwice => "guest_display.restore.twice",
             DeathKind::FinishRestoreUnexpected => "guest_display.restore.unexpected",
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(apv_guest_4k)]
             DeathKind::ColorMatrixOutsidePage => "guest_display.color_matrix.outside_page",
         }
     }
@@ -269,7 +270,7 @@ impl DeathKind {
             DeathKind::ShowHandlerGone
             | DeathKind::MoveHandlerGone
             | DeathKind::GlyphHandlerGone => K::NilBlock,
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(apv_guest_4k)]
             DeathKind::ColorMatrixOutsidePage => K::OutOfBounds,
             _ => K::Assert,
         }

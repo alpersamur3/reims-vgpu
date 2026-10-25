@@ -327,12 +327,13 @@ typedef bool (*RvgMapMemoryFn)(void *ctx,
 typedef bool (*RvgUnmapMemoryFn)(void *ctx, void *task, uint64_t virtual_offset, uint64_t length);
 
 // `read_memory(ctx, physical_address, length, dst)`: copy guest memory into `dst`. Returns false
-// for a failure. The device reads guest physical memory this way, at most one guest page (16 KiB
-// on arm64, 4 KiB on x86-64) a call: a task's page tables, the task memory it copies through
-// them, and each task's root node at a resume. With a memory map it reads through the map, and a
-// config that gives read_memory is refused. Without a map and without read_memory, it maps the
-// page into its root task (map_memory, then unmap_memory) and copies from there; while the guest
-// has no root page, the device has no root task, and the read fails.
+// for a failure. The device reads guest physical memory this way, at most one guest page a call
+// (16 KiB; 4 KiB only from an x86-64 build without `guest-arm64`, which serves x86-64 guests): a
+// task's page tables, the task memory it copies through them, and each task's root node at a
+// resume. With a memory map it reads through the map, and a config that gives read_memory is
+// refused. Without a map and without read_memory, it maps the page into its root task (map_memory,
+// then unmap_memory) and copies from there; while the guest has no root page, the device has no
+// root task, and the read fails.
 //
 // Thread, and what it may call: as RvgCreateTaskFn. It may wait for another host thread, unless
 // that thread is itself waiting in a call on this device that may call back.

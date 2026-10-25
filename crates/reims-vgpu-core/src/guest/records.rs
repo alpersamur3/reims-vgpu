@@ -17,14 +17,14 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 use crate::num::Truncate;
 
 /// The guest page shift: 14 for an arm64 guest's 16 KiB pages, 12 for an x86-64 guest's 4 KiB
-/// ones, the build's architecture's. QEMU offers the device only to guests of its host's own
-/// architecture, those HVF or KVM runs there, so the guest's is the build's: an arm64 build
-/// serves arm64 guests, an x86-64 build x86-64 ones (core's tests also run as x86-64 under
-/// Rosetta on a Mac). Every page number the guest hands the device counts these pages. Name is
-/// ours: the shift of `APV_PAGE_SIZE`.
-pub const APV_PAGE_SHIFT: u32 = if cfg!(target_arch = "x86_64") { 12 } else { 14 };
+/// ones. The guest is the build's architecture unless the `guest-arm64` feature makes it arm64:
+/// build.rs sets `cfg(apv_guest_4k)` only for an x86-64 build without it (core's tests also run
+/// as x86-64 under Rosetta on a Mac). Every page number the guest hands the device counts these
+/// pages; the host VM's page (`HostVm::page_size`) may be smaller. Name is ours: the shift of
+/// `APV_PAGE_SIZE`.
+pub const APV_PAGE_SHIFT: u32 = if cfg!(apv_guest_4k) { 12 } else { 14 };
 
-/// `APV_PAGE_SIZE`: the guest page size, 16 KiB (4 KiB on x86-64).
+/// `APV_PAGE_SIZE`: the guest page size, 16 KiB (4 KiB with `cfg(apv_guest_4k)`).
 pub const APV_PAGE_SIZE: u64 = 1_u64.wrapping_shl(APV_PAGE_SHIFT);
 
 /// A guest address's offset in its page. Name is ours: the mask of `APV_PAGE_SIZE`.
@@ -521,11 +521,11 @@ mod tests {
         assert_eq!(APV_MAX_FIFOS, 64);
     }
 
-    /// On arm64 every guest-page constant derived from `APV_PAGE_SHIFT` keeps the value its
-    /// 16 KiB literal had
-    #[cfg(target_arch = "aarch64")]
+    /// On 16 KiB guest pages every guest-page constant derived from `APV_PAGE_SHIFT` keeps the
+    /// value its 16 KiB literal had
+    #[cfg(not(apv_guest_4k))]
     #[test]
-    fn guest_page_constants_keep_their_16k_values_on_aarch64() {
+    fn guest_page_constants_keep_their_16k_values_on_a_16k_guest() {
         use crate::{device::root, display, fifo::ring, memory::page_table};
         assert_eq!(APV_PAGE_SHIFT, 14);
         assert_eq!(APV_PAGE_SIZE, 0x4000);
@@ -540,11 +540,11 @@ mod tests {
         assert_eq!(display::page::PAGE_LENGTH, 0x4000);
     }
 
-    /// On x86-64 the guest's pages are 4 KiB: a page table is 1024 entries of 4 KiB page numbers,
-    /// and the display state page's mapping is one of them
-    #[cfg(target_arch = "x86_64")]
+    /// With 4 KiB guest pages (an x86-64 guest) a page table is 1024 entries of 4 KiB page
+    /// numbers, and the display state page's mapping is one of them
+    #[cfg(apv_guest_4k)]
     #[test]
-    fn guest_page_constants_are_4k_on_x86_64() {
+    fn guest_page_constants_are_4k_on_a_4k_guest() {
         use crate::{device::root, display, fifo::ring, memory::page_table};
         assert_eq!(APV_PAGE_SHIFT, 12);
         assert_eq!(APV_PAGE_SIZE, 0x1000);

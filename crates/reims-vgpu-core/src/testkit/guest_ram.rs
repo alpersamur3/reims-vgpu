@@ -48,15 +48,23 @@ impl RawRegion {
     /// `len` zero bytes, page aligned. `None` when the allocator refuses (or `len` does not fit
     /// a layout). A zero length gives a region with a dangling, page-aligned address.
     pub fn new(len: u64) -> Option<Arc<RawRegion>> {
+        RawRegion::new_aligned(len, PAGE_SIZE)
+    }
+
+    /// `len` zero bytes aligned to `align` (a power of two, at least the host page). `None` when
+    /// the allocator refuses (or `len` and `align` do not fit a layout). A zero length gives a
+    /// region with a dangling address aligned to `align`.
+    pub fn new_aligned(len: u64, align: u64) -> Option<Arc<RawRegion>> {
         let len = usize::try_from(len).ok()?;
+        let align = usize::try_from(align.max(PAGE_SIZE)).ok()?;
         if len == 0 {
             return Some(Arc::new(RawRegion {
-                ptr: std::ptr::without_provenance_mut(PAGE_SIZE.to_usize()),
+                ptr: std::ptr::without_provenance_mut(align),
                 len: 0,
                 layout: None,
             }));
         }
-        let layout = Layout::from_size_align(len, PAGE_SIZE.to_usize()).ok()?;
+        let layout = Layout::from_size_align(len, align).ok()?;
         // SAFETY: the layout has a non-zero size.
         let ptr = unsafe { alloc_zeroed(layout) };
         if ptr.is_null() {
@@ -300,7 +308,9 @@ impl GuestRam {
     /// Adds `len` zero bytes at guest-physical `pa`; returns the host address. `None` if the
     /// allocation fails.
     pub fn add_range(&self, pa: u64, len: u64) -> Option<HostPtr> {
-        let region = RawRegion::new(len)?;
+        // Guest RAM is whole guest pages at a guest-page-aligned host address, as a host's guest
+        // RAM is (QEMU's is 64 KiB aligned); the fake VM's own allocations keep the host page.
+        let region = RawRegion::new_aligned(len, crate::guest::records::APV_PAGE_SIZE)?;
         let host = region.addr();
         self.ranges.lock().push(GuestRange {
             physical_address: pa,

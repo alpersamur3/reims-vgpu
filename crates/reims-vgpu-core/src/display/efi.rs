@@ -83,8 +83,8 @@ const MTL_PIXEL_FORMAT_BGRA8_UNORM: u64 = 80;
 const MTL_TEXTURE_USAGE_SHADER_READ: u64 = 1;
 /// `'BGRA'`, the IOSurface pixel format of every EFI present.
 const IOSURFACE_PIXEL_FORMAT_BGRA: u32 = 0x4247_5241;
-/// The framebuffer page shift: the start register counts guest pages (16 KiB, 4 KiB on x86-64,
-/// as the option ROM writes it).
+/// The framebuffer page shift: the start register counts guest pages (16 KiB, 4 KiB with
+/// `cfg(apv_guest_4k)`, as the option ROM writes it).
 const PAGE_SHIFT: u32 = APV_PAGE_SHIFT;
 /// The page mask a length must clear.
 pub(crate) const PAGE_MASK: u32 = num::bit32(PAGE_SHIFT).wrapping_sub(1);

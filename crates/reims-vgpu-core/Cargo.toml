@@ -10,6 +10,11 @@ license.workspace = true
 [features]
 # core::testkit and testkit::capture outside this crate's own unit tests (architecture 13.2).
 testkit = []
+# The guest is arm64, with 16 KiB pages, whatever the build's architecture: an x86-64 build that
+# serves an arm64 guest under TCG. Without it an x86-64 build serves x86-64 guests with 4 KiB
+# pages (build.rs sets `cfg(apv_guest_4k)`); on an aarch64 build it changes nothing. It switches
+# the guest rather than adding to it: `--all-features` on x86-64 selects the arm64 guest.
+guest-arm64 = []
 
 # Architecture 2.2: no objc2, block2, dispatch2, mach2 or libc here.
 [dependencies]

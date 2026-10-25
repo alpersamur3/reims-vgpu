@@ -68,7 +68,8 @@ pub(crate) fn or_die<T, E: Into<Raise>>(r: Result<T, E>) -> T {
     }
 }
 
-/// A page number's guest-physical address: a 32-bit page reaches 2^46 bytes (2^44 on x86-64).
+/// A page number's guest-physical address: a 32-bit page reaches 2^46 bytes (2^44 on 4 KiB guest
+/// pages).
 fn page_address(page: u32) -> u64 {
     u64::from(page).wrapping_mul(APV_PAGE_SIZE)
 }

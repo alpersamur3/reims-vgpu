@@ -122,6 +122,9 @@ mod tests {
     type Task = MappingTask<FakePlatform>;
     /// The host's page.
     const PAGE: u64 = crate::testkit::guest_ram::PAGE_SIZE;
+    /// The guest's page: a task's size is whole ones (`MappingTask::new`). The host's page may
+    /// be smaller (16 KiB guest pages over a 4 KiB host).
+    const GPAGE: u64 = APV_PAGE_SIZE;
 
     fn plat() -> Arc<FakePlatform> {
         Arc::new(FakePlatform::new())
@@ -220,7 +223,7 @@ mod tests {
             p.script()
                 .push("mach_vm_allocate", Step::value(KernReturn(3)));
             let before = vm_calls(&p).len();
-            assert!(Task::new(p.clone(), PAGE, m.clone()).is_none());
+            assert!(Task::new(p.clone(), GPAGE, m.clone()).is_none());
             assert_eq!(
                 sels(&vm_calls(&p).split_off(before)),
                 vec!["mach_vm_allocate"]
@@ -237,13 +240,13 @@ mod tests {
             p.script()
                 .push("mach_vm_protect", Step::value(KernReturn(2)));
             let before = vm_calls(&p).len();
-            assert!(Task::new(p.clone(), 2 * PAGE, m).is_none());
+            assert!(Task::new(p.clone(), 2 * GPAGE, m).is_none());
             let calls = vm_calls(&p).split_off(before);
             assert_eq!(
                 sels(&calls),
                 vec!["mach_vm_allocate", "mach_vm_protect", "mach_vm_deallocate"]
             );
-            assert_eq!(calls[2].args[1], Arg::U64(2 * PAGE));
+            assert_eq!(calls[2].args[1], Arg::U64(2 * GPAGE));
             assert_eq!(calls[1].args[0], calls[2].args[0]);
         }
     }
@@ -256,7 +259,7 @@ mod tests {
         fn deallocates_then_releases_map() {
             let p = plat();
             let (_ram, m) = map(&p, PAGE);
-            let t = Task::new(p.clone(), 2 * PAGE, m.clone()).unwrap();
+            let t = Task::new(p.clone(), 2 * GPAGE, m.clone()).unwrap();
             let base = t.base_address();
             assert_eq!(Arc::strong_count(&m), 2);
             let before = vm_calls(&p).len();
@@ -265,7 +268,7 @@ mod tests {
             assert_eq!(sels(&calls), vec!["mach_vm_deallocate"]);
             assert_eq!(
                 calls[0].args,
-                vec![Arg::Ptr(base.addr()), Arg::U64(2 * PAGE)]
+                vec![Arg::Ptr(base.addr()), Arg::U64(2 * GPAGE)]
             );
             assert_eq!(Arc::strong_count(&m), 1);
             assert!(!p.fake_vm().is_mapped(base, PAGE));
@@ -302,7 +305,7 @@ mod tests {
         fn refusal_passes_through() {
             let p = plat();
             let (_ram, m) = map(&p, PAGE);
-            let t = Task::new(p.clone(), 2 * PAGE, m).unwrap();
+            let t = Task::new(p.clone(), 2 * GPAGE, m).unwrap();
             let ranges = [PhysRange {
                 physical_address: 0,
                 physical_length: PAGE,
@@ -377,7 +380,7 @@ mod tests {
         fn allocate_failure_is_no() {
             let p = plat();
             let (_ram, m) = map(&p, PAGE);
-            let t = Task::new(p.clone(), 2 * PAGE, m).unwrap();
+            let t = Task::new(p.clone(), 2 * GPAGE, m).unwrap();
             p.script()
                 .push("mach_vm_allocate", Step::value(KernReturn(1)));
             let before = vm_calls(&p).len();
@@ -393,7 +396,7 @@ mod tests {
         fn protect_failure_is_no() {
             let p = plat();
             let (_ram, m) = map(&p, PAGE);
-            let t = Task::new(p.clone(), 2 * PAGE, m).unwrap();
+            let t = Task::new(p.clone(), 2 * GPAGE, m).unwrap();
             p.script()
                 .push("mach_vm_protect", Step::value(KernReturn(2)));
             assert!(!t.unmap_memory_at_virtual_offset(0, PAGE));
@@ -407,8 +410,8 @@ mod tests {
         fn synthesized_getters() {
             let p = plat();
             let (_ram, m) = map(&p, PAGE);
-            let t = Task::new(p.clone(), 3 * PAGE, m).unwrap();
-            assert_eq!(t.size(), 3 * PAGE);
+            let t = Task::new(p.clone(), 3 * GPAGE, m).unwrap();
+            assert_eq!(t.size(), 3 * GPAGE);
             assert!(p.fake_vm().protection(t.base_address()).is_some());
         }
     }

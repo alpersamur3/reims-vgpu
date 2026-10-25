@@ -140,7 +140,8 @@ fn cargo_with(args: &[&str], env: &[(&str, &std::path::Path)]) -> Res<bool> {
 /// The features `check` tests with: every feature of the workspace's crates but the C API's
 /// `vulkan`, which makes every handle of the C API the Vulkan platform's, so that the pins and
 /// the C harness, which drive the product's C API, would run on that platform instead
-/// (architecture 13.1). Clippy lints with every feature as well, the C API's on Vulkan among them.
+/// (architecture 13.1), and `guest-arm64`, which switches an x86-64 build's guest to arm64. Clippy
+/// lints with every feature as well, the C API's on Vulkan among them.
 const TESTED_FEATURES: &str = "reims-vgpu-core/testkit,reims-vgpu/testkit,reims-vgpu/vulkan";
 
 /// The features on Linux, where the Vulkan platform is the only one, the C API's included.

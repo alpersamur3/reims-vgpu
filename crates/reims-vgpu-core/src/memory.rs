@@ -161,7 +161,7 @@ pub enum DeathKind {
     RootMappingNoDevice,
     /// A walk reading the table at guest page 0.
     WalkZeroTable,
-    /// A table read past the table's entries (4096, 1024 on x86-64).
+    /// A table read past the table's entries (4096, 1024 on 4 KiB guest pages).
     WalkReadPastTable,
     /// A walk of depth 0.
     WalkNoLevels,

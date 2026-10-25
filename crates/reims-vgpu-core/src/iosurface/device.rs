@@ -29,6 +29,7 @@ use std::sync::{Arc, Weak};
 use parking_lot::Mutex;
 
 use crate::guest::GuestPtr;
+use crate::guest::records::{APV_PAGE_SHIFT, APV_PAGE_SIZE};
 use crate::host::{HostPtr, RaiseInterrupt};
 use crate::iosurface::DeathKind;
 use crate::iosurface::descriptor::{Form, IoSurfaceHostDeviceDescriptor};
@@ -219,7 +220,7 @@ pub struct HostDeviceCore<P: Platform> {
     pub(super) state: Mutex<QueueState<P>>,
     /// What the teardown releases. Taken after `state`, never before.
     pub(super) maps: Mutex<Mappings<P>>,
-    /// The platform (the VM page size, IOSurfaces, logs).
+    /// The platform (IOSurfaces, logs).
     pub(super) platform: Arc<P>,
     /// This state's own `Weak`, for the blocks the device queues: a block owns what it uses and
     /// holds the state, never the host's device.
@@ -275,7 +276,7 @@ impl<P: Platform> IoSurfaceHostDevice<P> {
         platform: &Arc<P>,
         descriptor: &IoSurfaceHostDeviceDescriptor,
     ) -> Result<HostDeviceHandle<P>, IoSurfaceRefusal> {
-        let page = platform.vm().page_size();
+        let page = APV_PAGE_SIZE;
         let table_len = page / const { NonZeroU64::new(TABLE_ENTRY_SIZE).unwrap() };
         let descriptors_per_page = page / Form::First.size();
         let mmio_length = descriptor.mmio_length;
@@ -378,14 +379,16 @@ impl<P: Platform> HostDeviceCore<P> {
             })
     }
 
-    /// The VM page size.
+    /// The guest page size (`APV_PAGE_SIZE`), which the mapper's table, descriptor pages and
+    /// page tables count; not the host VM's, which may be smaller.
     pub(super) fn page_size(&self) -> u64 {
-        self.platform.vm().page_size()
+        APV_PAGE_SIZE
     }
 
-    /// The VM page shift.
+    /// The guest page shift (`APV_PAGE_SHIFT`), which the table's and page tables' page numbers
+    /// count; not the host VM's.
     pub(super) fn page_shift(&self) -> u32 {
-        self.platform.vm().page_shift()
+        APV_PAGE_SHIFT
     }
 
     /// Another reference to the IOSurface mapped at `mapping_id`, made on the device's queue;
