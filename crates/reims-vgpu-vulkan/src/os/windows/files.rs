@@ -303,6 +303,19 @@ pub(crate) fn meets_registration(first: u64, length: u64) -> bool {
         .any(|r| r.first < end && first < r.end)
 }
 
+/// Whether `length` bytes from `first` lie wholly in one registration: the host's own committed
+/// read-write pages (the guest's RAM), which the VM knows without asking Win32. `VirtualQuery`
+/// of a page in a view of a large section is slow: it walks the view's page entries from the
+/// page to where they stop matching, about all of the guest's 4 GiB at each call.
+pub(crate) fn within_registration(first: u64, length: u64) -> bool {
+    let end = first.saturating_add(length);
+    let table = TABLE.lock();
+    table
+        .registered
+        .iter()
+        .any(|r| r.first <= first && end <= r.end)
+}
+
 /// `length` bytes from `first` are one view of `backing` from now on (module docs).
 pub(crate) fn record_view(first: u64, length: u64, backing: Backing) {
     let end = first.saturating_add(length);
