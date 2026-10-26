@@ -714,7 +714,8 @@ impl WindowsVm {
         WindowsVm
     }
 
-    /// Whether every page of the `len` bytes at `addr` is committed with read access, as
+    /// Whether every page of the `len` bytes at `addr` is committed with read access: those in
+    /// a registration of the guest's RAM are (the host maps it read and write), the others as
     /// `VirtualQuery` reports them (a view's pages and private pages alike). A `len` of 0 is
     /// `true`.
     pub fn readable(&self, addr: HostAddr, len: u64) -> bool {
@@ -724,7 +725,7 @@ impl WindowsVm {
         let Some((first, length)) = pages(addr, len) else {
             return false;
         };
-        every_page(first, length, reads)
+        files::within_registration(first, length) || every_page(first, length, reads)
     }
 }
 
