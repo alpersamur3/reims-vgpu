@@ -4,7 +4,7 @@
 //! window system's Vulkan extensions take here (`crate::os`'s `wsi`: `VK_KHR_win32_surface` and
 //! `vulkan-1.dll`). No Objective-C runs here, as on Linux.
 //!
-//! **What this arm does and refuses** (M3a.3, section-backed views):
+//! **What this arm does** (section-backed views, IOSurface stand-ins):
 //! - Real: the clocks, the threads, fresh zero-filled ranges at or above 4 GiB (`VirtualAlloc2`
 //!   with an address requirement, as core's `GuestPtr` dies on any address below
 //!   `ZERO_REGION_END`), protection, deallocation and the readable probe.
@@ -13,7 +13,9 @@
 //!   section over placeholders carved out of the target (`MapViewOfFile3` with
 //!   `MEM_REPLACE_PLACEHOLDER`), looked up in the process's backing table ([`files`]). The VM's
 //!   own aliasable ranges come from a library-owned section the same way.
-//! - Refused: IOSurface stand-ins (`create` answers none), a later step.
+//! - Real: IOSurface stand-ins, as on Linux ([`surface`]): a surface of its own memory is a view
+//!   of a library-owned section, registered so that no `deallocate` frees it; one over several
+//!   ranges of the guest's pages is a view of their sections.
 //! - Imports are of the bytes themselves, as on macOS: the runtime's Windows importer takes a
 //!   host pointer with `VK_EXT_external_memory_host`'s `HOST_ALLOCATION` handle type, which the
 //!   RTX 4080's Windows driver takes for committed memory and for a section's view alike
