@@ -16,13 +16,15 @@
 //! - Real: IOSurface stand-ins, as on Linux ([`surface`]): a surface of its own memory is a view
 //!   of a library-owned section, registered so that no `deallocate` frees it; one over several
 //!   ranges of the guest's pages is a view of their sections.
-//! - Imports are of the bytes themselves, as on macOS: the runtime's Windows importer takes a
-//!   host pointer with `VK_EXT_external_memory_host`'s `HOST_ALLOCATION` handle type, which the
-//!   RTX 4080's Windows driver takes for committed memory and for a section's view alike
-//!   (measured, M3a.0).
+//! - Imports are of the bytes themselves where they are read and write: the runtime's Windows
+//!   importer takes a host pointer with `VK_EXT_external_memory_host`'s `HOST_ALLOCATION` handle
+//!   type, which the RTX 4080's Windows driver takes for committed memory and for a section's
+//!   view alike (measured). Read-only memory it refuses, so that is imported through a
+//!   writable twin of its sections, as on Linux ([`import`]).
 
 mod clock;
 mod files;
+mod import;
 mod surface;
 mod threads;
 mod vm;
@@ -32,13 +34,13 @@ use std::ptr::NonNull;
 
 use ash::vk;
 use metal2vulkan_runtime as rt;
-use reims_vgpu_core::platform::os::vm::{HostAddr, KernReturn};
 
 pub use clock::WindowsClock;
 pub use surface::{WindowsSurface, WindowsSurfaces};
 pub use threads::WindowsThreads;
 pub use vm::WindowsVm;
 
+pub(crate) use import::{TWINS_READ_ONLY, allocate_zeros, import_view, shown_at};
 pub(crate) use surface::{plane_at, plane_shape, recorded_mut, surface_memory_hold, ycbcr_matrix};
 #[cfg(test)]
 pub(crate) use vm::tests::{PAGE, mapped, writable};
@@ -116,51 +118,6 @@ pub use files::{GuestMemoryLease, lease_guest_memory};
 /// own over a placeholder, recorded in the backing table ([`vm::allocate_aliasable`]).
 pub(crate) use vm::allocate_aliasable;
 
-/// A fresh range of `len` bytes of zeros that a view can be made of: [`allocate_aliasable`]'s,
-/// which Windows zero-fills.
-pub(crate) fn allocate_zeros(len: u64) -> Result<HostAddr, KernReturn> {
-    allocate_aliasable(len)
-}
-
-/// Whether the runtime imports read-only memory through a writable twin of its files: not on
-/// Windows, where it imports the bytes themselves ([`import_view`]).
-pub(crate) const TWINS_READ_ONLY: bool = false;
-
-/// The memory the runtime imports for some bytes: on Windows those bytes themselves, which the
-/// runtime imports by their host pointer (`HOST_ALLOCATION`).
-#[derive(Debug)]
-pub(crate) struct ImportView {
-    at: NonNull<u8>,
-}
-
-impl ImportView {
-    /// The first byte the runtime imports.
-    pub(crate) fn at(&self) -> NonNull<u8> {
-        self.at
-    }
-
-    /// Whether the GPU's writes through the import are kept where a read-only import drops
-    /// them: never here, as the bytes themselves are imported.
-    pub(crate) fn writes_kept(&self) -> bool {
-        false
-    }
-
-    /// The runtime's deallocator of the import, and what keeps the import's memory mapped beside
-    /// the bytes themselves: `inner`, as it is, and nothing, as the runtime imports the bytes.
-    pub(crate) fn release(
-        self,
-        _original: NonNull<u8>,
-        inner: Option<rt::Deallocator>,
-    ) -> (Option<rt::Deallocator>, Option<rt::KeepAlive>) {
-        (inner, None)
-    }
-}
-
-/// The memory the runtime imports for `length` bytes at `at`: those bytes ([`ImportView`]).
-pub(crate) fn import_view(at: NonNull<u8>, _length: u64) -> ImportView {
-    ImportView { at }
-}
-
 /// The runtime's host memory at `at`, the first byte of an import ([`ImportView::at`]): the bytes
 /// alone.
 ///
@@ -177,7 +134,3 @@ pub(crate) fn dma_buf_refusal() -> Option<String> {
     None
 }
 
-/// The address whose bytes the runtime's memory at `at` shows: `at`, as there are no twins.
-pub(crate) fn shown_at(at: NonNull<u8>) -> NonNull<u8> {
-    at
-}

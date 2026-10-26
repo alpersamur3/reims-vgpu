@@ -594,6 +594,63 @@ pub(crate) fn allocate_aliasable(len: u64) -> Result<HostAddr, KernReturn> {
     Ok(HostAddr::from_addr(at.to_usize()))
 }
 
+/// A writable twin of the `length` bytes `pieces` show, each `at` bytes in (`super::import`): a
+/// fresh placeholder at or above 4 GiB, each piece's section mapped over its part read and write,
+/// but private zeros over a piece `zeros` names. Neither a run nor a registration of the backing
+/// table: only its views are listed, so [`drop_twin`] can unmap them. Its first byte; `None`, with
+/// nothing left mapped, where Win32 refuses a part.
+pub(super) fn twin(
+    length: u64,
+    pieces: &[Piece],
+    zeros: impl Fn(&Backing) -> bool,
+) -> Option<u64> {
+    let _mutation = files::mutation();
+    let base = reserve_placeholder(length).ok()?;
+    for piece in pieces {
+        let at = base + piece.at;
+        let made = isolate(at, piece.length).is_ok()
+            && if zeros(&piece.backing) {
+                commit_private(at, piece.length, PAGE_READWRITE).is_ok()
+            } else {
+                map_view(at, piece.length, &piece.backing).is_ok()
+            };
+        if !made {
+            log::debug!(
+                target: "reims_vgpu_vulkan::os",
+                "a twin's {:#x} bytes at {at:#x}: {}",
+                piece.length,
+                std::io::Error::last_os_error()
+            );
+            free_twin(base, length);
+            return None;
+        }
+    }
+    Some(base)
+}
+
+/// Unmaps the twin of `length` bytes at `first` that [`twin`] made and frees its address space.
+pub(super) fn drop_twin(first: u64, length: u64) {
+    let _mutation = files::mutation();
+    free_twin(first, length);
+}
+
+/// [`drop_twin`], under the mutation lock: its views unmapped and its private zeros freed, back
+/// to placeholders, which are merged into the one it reserved and released (logged where Win32
+/// refuses, the address space then kept).
+fn free_twin(first: u64, length: u64) {
+    let end = first + length;
+    let freed = clear(first, end, false).is_ok()
+        && regions(first, end).is_some_and(|r| r.len() < 2 || coalesce(first, length))
+        && release(first);
+    if !freed {
+        log::error!(
+            target: "reims_vgpu_vulkan::os",
+            "a twin's {length:#x} bytes at {first:#x} were not freed: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+}
+
 /// Memory of the library's own that a view can be made of and that only its holder frees: a
 /// view of a new pagefile section over a placeholder of its own, read and write, at or above
 /// 4 GiB, registered in the backing table ([`files::Registration`]) rather than recorded as a
