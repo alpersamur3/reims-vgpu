@@ -263,7 +263,10 @@ pub struct RvgMemoryMap {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RvgMemoryRangeFile {
     /// An open file descriptor, which the library duplicates during the create (the host may
-    /// close its own afterwards), or -1 for a range with no file.
+    /// close its own afterwards), or -1 for a range with no file. On Windows, the value of the
+    /// section's HANDLE (`CreateFileMappingW`) as `(int32_t)(intptr_t)handle`: a kernel handle
+    /// fits in 32 bits, and the library widens it back; the range's host memory must be a view
+    /// of that section from `offset` (`MapViewOfFile3`).
     pub fd: i32,
     /// 0; other values are refused.
     pub flags: u32,
@@ -309,11 +312,14 @@ pub struct RvgDeviceConfig {
     /// library builds its views of guest pages from these files (a range without one gets no
     /// view, and a guest use that needs one fails as a failed remap does, as does one over a
     /// file of huge pages, hugetlbfs, which the checks below accept and no view of a page of the
-    /// host's size can map: give such a range fd -1); on macOS they are checked and not used. Files without a map are refused, and so is an entry whose `fd` is
-    /// below -1, whose `flags` are not 0, or, for an `fd` of 0 or more, whose file `fstat`
-    /// cannot read, holds fewer than `offset` + the range's length bytes, or whose `offset` is
-    /// not a multiple of the host's page size: RVG_ERR_INVALID_ARGUMENT, in that order, before
-    /// any file is duplicated.
+    /// host's size can map: give such a range fd -1); on macOS they are checked and not used; on
+    /// Windows they are section handles the library's views of the guest's pages are made of
+    /// (`RvgMemoryRangeFile::fd`). Files without a map are refused, and so is an entry whose
+    /// `fd` is below -1, whose `flags` are not 0, or, for an `fd` of 0 or more, whose file
+    /// `fstat` cannot read (on Windows: whose section no view of the span can be mapped of),
+    /// holds fewer than `offset` + the range's length bytes, or whose `offset` is not a multiple
+    /// of the host's page size: RVG_ERR_INVALID_ARGUMENT, in that order, before any file is
+    /// duplicated.
     pub memory_files: *const RvgMemoryRangeFile,
     /// With `process_isolation`: isolate a guest task other than task 0 only when, as the guest
     /// defines it, the RvgIOSurfaceDevice the device maps through (`use_iosurface_mapper`) has a
@@ -432,8 +438,8 @@ pub(crate) unsafe fn memory_map(
 /// Why the file entry `f` of range `r` is refused, as the end of a log line, or `None`: an `fd`
 /// below -1, `flags` other than 0, and for an `fd` of 0 or more, a file `fstat` cannot read, one
 /// holding fewer than `offset + physical_length` bytes, or an `offset` that is not a multiple of
-/// `page`, in that order (`device/unix.rs`). On Windows every `fd` of 0 or more is refused
-/// (`device/windows.rs`).
+/// `page`, in that order (`device/unix.rs`). On Windows an `fd` of 0 or more is a section
+/// handle, refused when no view of the span can be mapped of it (`device/windows.rs`).
 fn file_refusal(r: &RvgMemoryRange, f: &RvgMemoryRangeFile, page: NonZeroU64) -> Option<String> {
     if f.fd < -1 {
         return Some(format!("has fd {}, below -1", f.fd));
