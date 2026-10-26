@@ -594,6 +594,59 @@ pub(crate) fn allocate_aliasable(len: u64) -> Result<HostAddr, KernReturn> {
     Ok(HostAddr::from_addr(at.to_usize()))
 }
 
+/// Memory of the library's own that a view can be made of and that only its holder frees: a
+/// view of a new pagefile section over a placeholder of its own, read and write, at or above
+/// 4 GiB, registered in the backing table ([`files::Registration`]) rather than recorded as a
+/// run, so that `deallocate` refuses it, as on Linux. An IOSurface stand-in's memory.
+#[derive(Debug)]
+pub(crate) struct OwnMemory {
+    first: u64,
+    registration: Option<files::Registration>,
+}
+
+impl OwnMemory {
+    /// `len` bytes, rounded up to whole pages, of zeros; `None` for none, or where Windows gives
+    /// no section or no address space.
+    pub(crate) fn new(len: u64) -> Option<OwnMemory> {
+        let (_, length) = pages(HostAddr::NULL, len)?;
+        if length == 0 {
+            return None;
+        }
+        let backing = Backing {
+            section: section(length).ok()?,
+            offset: 0,
+        };
+        let _mutation = files::mutation();
+        let first = reserve_placeholder(length).ok()?;
+        if map_view(first, length, &backing).is_err() {
+            release(first);
+            return None;
+        }
+        Some(OwnMemory {
+            first,
+            registration: Some(files::Registration::new(first, length, backing)),
+        })
+    }
+
+    /// The first byte.
+    pub(crate) fn first(&self) -> u64 {
+        self.first
+    }
+}
+
+impl Drop for OwnMemory {
+    /// Drops the registration, then the view and the placeholder under it. The section goes
+    /// with the last view or run of it: a view another range made of this memory keeps showing
+    /// its pages.
+    fn drop(&mut self) {
+        drop(self.registration.take());
+        let _mutation = files::mutation();
+        if unmap_view(self.first).is_some() {
+            release(self.first);
+        }
+    }
+}
+
 /// Mach VM's calls on the current process (module docs).
 #[derive(Debug, Default, Clone, Copy)]
 pub struct WindowsVm;

@@ -4,8 +4,9 @@
 //!
 //! - **macOS** (`os/macos.rs`): the metal crate's services, as they are, and IOSurface itself.
 //! - **Windows** (`os/windows.rs`): the clocks (interrupt time, precise system time), threads,
-//!   a host VM over Win32 virtual memory whose ranges lie at or above 4 GiB, and no views or
-//!   IOSurface stand-ins yet (ASoftware's port, its first step).
+//!   a host VM over Win32 virtual memory whose ranges lie at or above 4 GiB and that makes views
+//!   of the guest's pages by mapping their sections over placeholders (the backing table), and
+//!   IOSurface's stand-in over that memory (ASoftware's port).
 //! - **Linux** (`os/linux.rs`): the clocks (`CLOCK_BOOTTIME`, `CLOCK_REALTIME`), threads, a host
 //!   VM over `mmap` that makes views of the guest's pages by mapping their files (the backing
 //!   table), and IOSurface's stand-in over that memory.
