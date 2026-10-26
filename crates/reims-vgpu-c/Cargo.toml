@@ -44,9 +44,15 @@ tikv-jemallocator.workspace = true
 # `exception::catch` around every call of a host function (`ffi::host_call`, `ffi/catch/macos.rs`).
 objc2.workspace = true
 
-# The host's page size on Windows (device.rs).
+# The host's page size, and the section handles behind a memory map's ranges, on Windows
+# (device/windows.rs).
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_System_SystemInformation"] }
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Memory",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+] }
 
 [dev-dependencies]
 reims-vgpu = { workspace = true, features = ["testkit"] }
