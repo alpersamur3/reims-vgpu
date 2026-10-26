@@ -30,7 +30,7 @@ use std::ptr::NonNull;
 
 use ash::vk;
 use metal2vulkan_runtime as rt;
-use reims_vgpu_core::platform::os::vm::{HostAddr, HostVm as _, KernReturn};
+use reims_vgpu_core::platform::os::vm::{HostAddr, KernReturn};
 
 pub use clock::WindowsClock;
 pub use surface::{WindowsSurface, WindowsSurfaces};
@@ -105,24 +105,17 @@ pub fn default_gpu_core_count() -> Option<u64> {
     None
 }
 
-/// What a device holds of the guest's RAM while it lives: nothing yet. Section-backed guest RAM
-/// (the host's `CreateFileMappingW` section behind each range) is what views will be made of;
-/// until the memory map's ABI carries a section handle, a device holds none.
-#[derive(Debug)]
-pub struct GuestMemoryLease;
+/// What a device holds of the guest's RAM while it lives: the registrations, in the backing
+/// table, of the sections the host names behind the memory map's ranges, which views of the
+/// guest's pages are made of ([`files::lease_guest_memory`]).
+pub use files::{GuestMemoryLease, lease_guest_memory};
 
-/// The lease of the guest's RAM a device holds: nothing on Windows yet ([`GuestMemoryLease`]).
-pub fn lease_guest_memory(_: impl IntoIterator<Item = super::GuestRamFile>) -> GuestMemoryLease {
-    GuestMemoryLease
-}
+/// A fresh range of `len` bytes that a view can be made of: a view of a pagefile section of its
+/// own over a placeholder, recorded in the backing table ([`vm::allocate_aliasable`]).
+pub(crate) use vm::allocate_aliasable;
 
-/// A fresh range of `len` bytes that a view can be made of: on Windows, for now, any fresh
-/// committed range at or above 4 GiB, as on Mach; a view of it waits for section-backed ranges.
-pub(crate) fn allocate_aliasable(len: u64) -> Result<HostAddr, KernReturn> {
-    WindowsVm::new().allocate_anywhere(len)
-}
-
-/// A fresh range of `len` bytes of zeros that a view can be made of: [`allocate_aliasable`]'s.
+/// A fresh range of `len` bytes of zeros that a view can be made of: [`allocate_aliasable`]'s,
+/// which Windows zero-fills.
 pub(crate) fn allocate_zeros(len: u64) -> Result<HostAddr, KernReturn> {
     allocate_aliasable(len)
 }
