@@ -4,20 +4,23 @@
 //! window system's Vulkan extensions take here (`crate::os`'s `wsi`: `VK_KHR_win32_surface` and
 //! `vulkan-1.dll`). No Objective-C runs here, as on Linux.
 //!
-//! **What this first arm does and refuses** (M3a.1, the build skeleton):
+//! **What this arm does and refuses** (M3a.3, section-backed views):
 //! - Real: the clocks, the threads, fresh zero-filled ranges at or above 4 GiB (`VirtualAlloc2`
 //!   with an address requirement, as core's `GuestPtr` dies on any address below
 //!   `ZERO_REGION_END`), protection, deallocation and the readable probe.
-//! - Refused: views of the guest's pages (`remap_shared_overwrite` answers
-//!   `KERN_INVALID_ADDRESS`), so core makes no root node page and no root FIFO over a memory
-//!   map yet; and IOSurface stand-ins (`create` answers none). Both need section-backed guest
-//!   RAM and placeholder views (`CreateFileMappingW` + `MapViewOfFile3`), the next steps.
+//! - Real: views of the guest's pages. The guest's RAM is a view of a pagefile section the host
+//!   names in its memory map (`CreateFileMappingW`); `remap_shared_overwrite` maps the pages'
+//!   section over placeholders carved out of the target (`MapViewOfFile3` with
+//!   `MEM_REPLACE_PLACEHOLDER`), looked up in the process's backing table ([`files`]). The VM's
+//!   own aliasable ranges come from a library-owned section the same way.
+//! - Refused: IOSurface stand-ins (`create` answers none), a later step.
 //! - Imports are of the bytes themselves, as on macOS: the runtime's Windows importer takes a
 //!   host pointer with `VK_EXT_external_memory_host`'s `HOST_ALLOCATION` handle type, which the
 //!   RTX 4080's Windows driver takes for committed memory and for a section's view alike
 //!   (measured, M3a.0).
 
 mod clock;
+mod files;
 mod surface;
 mod threads;
 mod vm;
