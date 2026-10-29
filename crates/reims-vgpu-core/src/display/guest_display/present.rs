@@ -558,7 +558,8 @@ impl<P: Platform> GuestDisplay<P> {
     }
 
     /// The guest's sleep: the raw byte, stored in the page and kept for the presents. With a
-    /// queue, a block on it logs the sleep, or logs the wake and signals the current frame.
+    /// queue, a block on it logs the sleep, or logs the wake and signals the current frame, and
+    /// tells the host's sleep handler.
     /// `asleep` is the guest's raw `BOOL` byte (FIFO opcode 9), stored and compared unnormalised.
     pub fn sleep_state(&self, asleep: u8) {
         let mut l = self.guest_display_mutex.lock();
@@ -583,15 +584,20 @@ impl<P: Platform> GuestDisplay<P> {
             };
             // The client read again when the block runs; each handler is tested first.
             self.dispatch(&queue, move |guest_display, client| {
+                // The host's sleep handler (no SDK handler: an ASoftware front end's) hears both.
+                let sleep = client.as_ref().and_then(|c| c.sleep_handler());
                 // `== 1`: any other byte wakes.
                 if asleep == 1 {
-                    // No display has a sleep handler (no front end sets one): the client is let
-                    // go, and the sleep is logged unhandled.
+                    // The SDK has no sleep handler: the client is let go, and the sleep is
+                    // logged unhandled.
                     drop(client);
                     log::info!(
                         "guest display on port {}: sleep, unhandled",
                         guest_display.port
                     );
+                    if let Some(h) = sleep {
+                        h(true);
+                    }
                 } else {
                     let handled = |client: &Option<Arc<DisplayCore<P>>>| {
                         client
@@ -610,6 +616,9 @@ impl<P: Platform> GuestDisplay<P> {
                         && let Some(c) = client
                     {
                         c.signal_current_frame();
+                    }
+                    if let Some(h) = sleep {
+                        h(false);
                     }
                 }
             });

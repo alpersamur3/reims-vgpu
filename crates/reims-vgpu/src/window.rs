@@ -160,7 +160,8 @@ impl GuestEvents for Window {
 }
 
 /// A window display's callbacks: each of the first four tells `window`, then calls the host's
-/// in `host` where it gave one; `cursor_move` is the host's alone, and does nothing without it.
+/// in `host` where it gave one; `cursor_move` is the host's alone, and does nothing without it;
+/// `sleep` is the host's as it gave it.
 /// All five are present, which the guest reads (module doc). The closures hold the window and
 /// the host's closures, never the display.
 pub(crate) fn tee<W: GuestEvents>(window: &Arc<W>, host: DisplayCallbacks) -> DisplayCallbacks {
@@ -170,6 +171,7 @@ pub(crate) fn tee<W: GuestEvents>(window: &Arc<W>, host: DisplayCallbacks) -> Di
         cursor_glyph,
         cursor_show,
         cursor_move,
+        sleep,
     } = host;
     let w = window.clone();
     let mode_change: crate::ModeChangeFn = Arc::new(move |width, height, format| {
@@ -206,6 +208,7 @@ pub(crate) fn tee<W: GuestEvents>(window: &Arc<W>, host: DisplayCallbacks) -> Di
         cursor_glyph: Some(cursor_glyph),
         cursor_show: Some(cursor_show),
         cursor_move: Some(cursor_move),
+        sleep,
     }
 }
 

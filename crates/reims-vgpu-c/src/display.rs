@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use reims_vgpu::{
     CursorGlyph, CursorGlyphFn, CursorMoveFn, CursorShowFn, Display, DisplayCallbacks,
-    DisplayConfig, DisplayMode, ModeChangeFn, NewFrameFn,
+    DisplayConfig, DisplayMode, ModeChangeFn, NewFrameFn, SleepFn,
 };
 
 use crate::device::RvgDevice;
@@ -126,6 +126,12 @@ pub type RvgCursorShowFn = Option<unsafe extern "C-unwind" fn(ctx: *mut c_void, 
 /// Thread, and what it may call: as RvgModeChangeFn. The guest reads whether the display has it.
 pub type RvgCursorMoveFn = Option<unsafe extern "C-unwind" fn(ctx: *mut c_void)>;
 
+/// `sleep(ctx, asleep)`: the guest put the display to sleep (`asleep` true) or woke it (false).
+/// Not an SDK handler: the guest sees no difference with or without it.
+///
+/// Thread, and what it may call: as RvgModeChangeFn.
+pub type RvgSleepFn = Option<unsafe extern "C-unwind" fn(ctx: *mut c_void, asleep: bool)>;
+
 /// A display's callbacks.
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -144,10 +150,17 @@ pub struct RvgDisplayCallbacks {
     pub cursor_glyph: RvgCursorGlyphFn,
     pub cursor_show: RvgCursorShowFn,
     pub cursor_move: RvgCursorMoveFn,
+    /// Since the second version: a host compiled before it gives none.
+    pub sleep: RvgSleepFn,
 }
 
 // SAFETY: repr(C), a u32 first; a pointer and optional function pointers.
-unsafe impl HostStruct for RvgDisplayCallbacks {}
+unsafe impl HostStruct for RvgDisplayCallbacks {
+    /// The first version ends at `cursor_move`.
+    const V1_SIZE: usize = 64;
+}
+
+const _: () = assert!(std::mem::offset_of!(RvgDisplayCallbacks, sleep) == RvgDisplayCallbacks::V1_SIZE);
 
 /// A display's config.
 #[repr(C)]
@@ -258,6 +271,14 @@ fn display_callbacks(t: &Arc<Table>, c: &RvgDisplayCallbacks) -> DisplayCallback
             let c: CursorMoveFn = Arc::new(move || {
                 // SAFETY: the host's function over its ctx.
                 ffi::host_call("cursor_move", || unsafe { f(t.ctx()) });
+            });
+            c
+        }),
+        sleep: c.sleep.map(|f| {
+            let t = t.clone();
+            let c: SleepFn = Arc::new(move |asleep| {
+                // SAFETY: the host's function over its ctx.
+                ffi::host_call("sleep", || unsafe { f(t.ctx(), asleep) });
             });
             c
         }),

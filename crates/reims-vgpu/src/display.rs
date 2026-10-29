@@ -128,6 +128,8 @@ pub type CursorGlyphFn = Arc<dyn Fn(&CursorGlyph<'_>) + Send + Sync>;
 pub type CursorShowFn = Arc<dyn Fn(u8) + Send + Sync>;
 /// The guest moved the cursor.
 pub type CursorMoveFn = Arc<dyn Fn() + Send + Sync>;
+/// The guest put its display to sleep (`true`) or woke it (`false`).
+pub type SleepFn = Arc<dyn Fn(bool) + Send + Sync>;
 
 /// A display's callbacks, each on the display thread. `None` is a callback the host does not
 /// give (each C typedef's comment says what the guest then sees).
@@ -143,6 +145,8 @@ pub struct DisplayCallbacks {
     pub cursor_show: Option<CursorShowFn>,
     /// The guest moved the cursor.
     pub cursor_move: Option<CursorMoveFn>,
+    /// The guest put its display to sleep or woke it (no SDK handler; the guest sees no change).
+    pub sleep: Option<SleepFn>,
 }
 
 impl std::fmt::Debug for DisplayCallbacks {
@@ -153,6 +157,7 @@ impl std::fmt::Debug for DisplayCallbacks {
             .field("cursor_glyph", &self.cursor_glyph.is_some())
             .field("cursor_show", &self.cursor_show.is_some())
             .field("cursor_move", &self.cursor_move.is_some())
+            .field("sleep", &self.sleep.is_some())
             .finish()
     }
 }
@@ -232,6 +237,7 @@ impl DisplayConfig {
             cursor_glyph,
             cursor_show,
             cursor_move,
+            sleep,
         } = self.callbacks;
         let mut d = self.hidden;
         if let Some(name) = self.name {
@@ -260,6 +266,7 @@ impl DisplayConfig {
         d.cursor_glyph_image_maker = None;
         d.cursor_show_handler = cursor_show;
         d.cursor_move_handler = cursor_move;
+        d.sleep_handler = sleep;
         d
     }
 }
