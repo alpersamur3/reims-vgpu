@@ -49,7 +49,7 @@ mod window;
 pub use device::{Device, DeviceConfig, HostCallbacks, MemoryFile, MemoryMap};
 pub use display::{
     CursorGlyph, CursorGlyphFn, CursorMoveFn, CursorShowFn, Display, DisplayCallbacks,
-    DisplayConfig, DisplayMode, ModeChangeFn, NewFrameFn,
+    DisplayConfig, DisplayMode, ModeChangeFn, NewFrameFn, SleepFn,
 };
 pub use error::{Error, ResumeError};
 pub use frame::{Frame, FrameTarget, MAX_FRAME_TARGET_SIZE, PixelFormat, Region};

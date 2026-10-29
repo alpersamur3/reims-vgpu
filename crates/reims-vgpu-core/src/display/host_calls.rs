@@ -78,6 +78,8 @@ pub type CursorGlyphHandler = Arc<dyn Fn(&CursorGlyph, DisplayCoord) + Send + Sy
 pub type CursorShowHandler = Arc<dyn Fn(u8) + Send + Sync>;
 /// The cursor move handler.
 pub type CursorMoveHandler = Arc<dyn Fn() + Send + Sync>;
+/// Not an SDK handler: the guest display's sleep, `true`, and wake, `false` (FIFO opcode 9).
+pub type SleepHandler = Arc<dyn Fn(bool) + Send + Sync>;
 
 /// A host object a reference keeps alive, reached through a pointer that holds none of its own.
 pub trait HostObject: Send + Sync {
@@ -99,6 +101,7 @@ struct Handlers {
     cursor_glyph: Option<CursorGlyphHandler>,
     cursor_show: Option<CursorShowHandler>,
     cursor_move: Option<CursorMoveHandler>,
+    sleep: Option<SleepHandler>,
 }
 
 /// The SDK's readonly properties a display keeps (the size, the queue, the five handlers, the
@@ -133,6 +136,7 @@ impl SdkProps {
                 cursor_glyph: desc.cursor_glyph_handler.take(),
                 cursor_show: desc.cursor_show_handler.take(),
                 cursor_move: desc.cursor_move_handler.take(),
+                sleep: desc.sleep_handler.take(),
             }),
         }
     }
@@ -202,6 +206,8 @@ impl SdkProps {
         let h = std::mem::take(&mut self.handlers.lock().cursor_show);
         drop(h);
         let h = std::mem::take(&mut self.handlers.lock().cursor_move);
+        drop(h);
+        let h = std::mem::take(&mut self.handlers.lock().sleep);
         drop(h);
     }
 }
@@ -297,5 +303,10 @@ impl<P: Platform> DisplayCore<P> {
     /// The cursor move handler.
     pub fn cursor_move_handler(&self) -> Option<CursorMoveHandler> {
         self.props.handlers.lock().cursor_move.clone()
+    }
+
+    /// The sleep handler (not an SDK handler).
+    pub fn sleep_handler(&self) -> Option<SleepHandler> {
+        self.props.handlers.lock().sleep.clone()
     }
 }

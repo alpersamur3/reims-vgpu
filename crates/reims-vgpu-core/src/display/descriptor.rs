@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use crate::display::host_calls::{
     CursorGlyphHandler, CursorMoveHandler, CursorShowHandler, GlyphImageMaker, ModeChangeHandler,
-    NewFrameEventHandler,
+    NewFrameEventHandler, SleepHandler,
 };
 use crate::display::{DisplayChromaticity, DisplayColorSpace, DisplayCoord, DisplayName};
 use crate::host::HostQueue;
@@ -61,6 +61,8 @@ pub struct DisplayDescriptor {
     pub cursor_show_handler: Option<CursorShowHandler>,
     /// `cursorMoveHandler`.
     pub cursor_move_handler: Option<CursorMoveHandler>,
+    /// Not an SDK property: told the guest display's sleep and wake, on the display's queue.
+    pub sleep_handler: Option<SleepHandler>,
     /// `colorSpace`.
     pub color_space: DisplayColorSpace,
     /// `configEpoch`.

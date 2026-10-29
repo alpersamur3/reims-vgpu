@@ -514,6 +514,12 @@ typedef void (*RvgCursorShowFn)(void *ctx, uint8_t show);
 // Thread, and what it may call: as RvgModeChangeFn. The guest reads whether the display has it.
 typedef void (*RvgCursorMoveFn)(void *ctx);
 
+// `sleep(ctx, asleep)`: the guest put the display to sleep (`asleep` true) or woke it (false).
+// Not an SDK handler: the guest sees no difference with or without it.
+//
+// Thread, and what it may call: as RvgModeChangeFn.
+typedef void (*RvgSleepFn)(void *ctx, bool asleep);
+
 // A display's callbacks.
 typedef struct {
   // sizeof(RvgDisplayCallbacks) as the host was compiled.
@@ -526,6 +532,8 @@ typedef struct {
   RvgCursorGlyphFn cursor_glyph;
   RvgCursorShowFn cursor_show;
   RvgCursorMoveFn cursor_move;
+  // Since the second version: a host compiled before it gives none.
+  RvgSleepFn sleep;
 } RvgDisplayCallbacks;
 
 // `pointer(ctx, x, y, width, height, buttons)`: the pointer is at (`x`, `y`) in the guest's
