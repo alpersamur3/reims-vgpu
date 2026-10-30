@@ -211,6 +211,26 @@ pub trait Platform: Sized + Send + Sync + 'static {
     fn host_blocks(&self, blocks: HostBlocks) -> HostBlocks {
         blocks
     }
+
+    /// Ours: a resume begins (`DeviceCore::will_resume`). The guest's tasks are gone (a suspend's,
+    /// a stop's or a reset's teardown), and with them the GPU VA ranges of their buffers and
+    /// heaps, which the state's placements still name: the guest pins each again as it makes its
+    /// resources again, one by one. A platform that places resources keeps the freed ranges for
+    /// those pins and places plain ones past them. By default nothing.
+    fn resuming(&self) {}
+
+    /// Ours: the end of the highest GPU VA range this process has held; what a saved state keeps
+    /// for [`Platform::keep_gpu_vas_below`]. By default 0, for a platform that places none.
+    fn gpu_va_high(&self) -> u64 {
+        0
+    }
+
+    /// Ours: a saved state's load, in a process that may be a new one, which knows nothing of
+    /// the ranges the state's placements name: a platform that places resources places plain ones
+    /// from `high` ([`Platform::gpu_va_high`] when the state was saved) on. By default nothing.
+    fn keep_gpu_vas_below(&self, high: u64) {
+        let _ = high;
+    }
 }
 
 /// A send to nil does nothing and returns zero (Objective-C). Used exactly where core sends to a

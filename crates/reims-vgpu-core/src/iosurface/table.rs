@@ -389,6 +389,67 @@ impl<P: Platform> HostDeviceCore<P> {
         st.host_only_bytes = host_only;
         log::debug!("released {count} surfaces");
     }
+
+    /// Maps again every surface whose guest descriptor has the mapped bit, through the table the
+    /// registers name now; returns how many slots hold a surface after it. A saved state's load
+    /// gives the guest back its memory, mapped bits and all, while the machine's reset left the
+    /// device with no surface: the host writes the registers again, the descriptor enable and base
+    /// first, then calls this before the guest runs. A descriptor page whose table entry is not
+    /// valid holds no surface and is passed over without a line; a refused map logs its own.
+    pub fn remap_surfaces(&self) -> u32 {
+        let Some(this) = self.block_self() else {
+            return 0;
+        };
+        // The GPU device's resume comes after this: the surfaces' ranges go past the guest's
+        // freed ones, which its pins take again.
+        self.platform.resuming();
+        self.hw_queue.sync(move || {
+            let mut st = this.state.lock();
+            this.remap_surfaces_locked(&mut st)
+        })
+    }
+
+    fn remap_surfaces_locked(&self, st: &mut QueueState<P>) -> u32 {
+        let Some(table) = st.table else {
+            return 0;
+        };
+        let size = self.form().size().get();
+        let per_page = st.descriptors_per_page;
+        let mut made: u32 = 0;
+        for page_index in 0..st.table_len {
+            let first = page_index.wrapping_mul(per_page);
+            if first >= MAPPING_ID_COUNT {
+                break;
+            }
+            let at = table.offset(page_index.wrapping_mul(TABLE_ENTRY_SIZE));
+            let entry = Entry(
+                self.mapped_access(at, TABLE_ENTRY_SIZE, DeathKind::TableRead, || {
+                    at.read_u32(0, DeathKind::TableRead)
+                }),
+            );
+            if !entry.valid() {
+                continue;
+            }
+            let Ok(page) = self.descriptor_page(st, page_index, first.low_u32()) else {
+                continue;
+            };
+            for within in 0..per_page {
+                let id = first.wrapping_add(within);
+                if id == 0 || id >= MAPPING_ID_COUNT {
+                    continue;
+                }
+                let d = page.offset(within.wrapping_mul(size));
+                let word = self.mapped_access(d, 4, DeathKind::DescriptorRead, || {
+                    d.read_u32(0, DeathKind::DescriptorRead)
+                });
+                if word & Entry::MAPPED != 0 && self.map(st, id.low_u32()) == IoReturn::Success {
+                    made = made.wrapping_add(1);
+                }
+            }
+        }
+        log::info!("remapped {made} surfaces");
+        made
+    }
 }
 
 #[cfg(test)]
@@ -852,5 +913,39 @@ mod tests {
                 (log::Level::Debug, "released 2 surfaces".to_owned()),
             ]
         );
+    }
+
+    mod remap {
+        use super::*;
+        use crate::iosurface::regs::REG_DESCRIPTOR_BASE;
+
+        /// A table write drops every surface and keeps the guest's mapped bits; once the table
+        /// is written again, the remap makes the marked surface again and leaves the unmarked one.
+        #[test]
+        fn remaps_marked_surfaces() {
+            let r = rig();
+            r.mapped_v2(3, 1);
+            r.put_v2(5, &v2(1, ROOT));
+            r.dev.mmio_write(REG_DESCRIPTOR_BASE, 0);
+            assert!(r.surface(3).is_none());
+            assert_ne!(r.word0_v2(3) & Entry::MAPPED, 0);
+            r.dev.mmio_write(REG_DESCRIPTOR_BASE, TABLE);
+            let logs = logs::capture();
+            assert_eq!(r.dev.remap_surfaces(), 1);
+            assert!(r.surface(3).is_some());
+            assert!(r.surface(5).is_none());
+            assert_eq!(r.word0_v2(5) & Entry::MAPPED, 0);
+            assert!(
+                lines_from(&logs, module_path!())
+                    .contains(&(log::Level::Info, "remapped 1 surfaces".to_owned()))
+            );
+        }
+
+        /// No table mapped: nothing is read and nothing made.
+        #[test]
+        fn without_a_table_makes_none() {
+            let r = rig();
+            assert_eq!(r.dev.remap_surfaces(), 0);
+        }
     }
 }

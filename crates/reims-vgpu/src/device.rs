@@ -454,6 +454,20 @@ impl<P: Platform> Device<P> {
         self.entry(|hold, d| d.did_resume(hold));
     }
 
+    /// The end of the highest GPU VA range this process has held: what a saved state keeps for
+    /// [`Device::keep_gpu_vas_below`]. 0 on a platform that places none.
+    pub fn gpu_va_high(&self) -> u64 {
+        self.entry(|_, _| self.platform.gpu_va_high())
+    }
+
+    /// A saved state's load, before anything of the guest's is made again, in a process that may
+    /// be a new one: plain GPU VA ranges now go from `high` ([`Device::gpu_va_high`] when the state
+    /// was saved) on, as the state's placements name the ranges below it and the guest pins each
+    /// again as it makes its resources again.
+    pub fn keep_gpu_vas_below(&self, high: u64) {
+        self.entry(|_, _| self.platform.keep_gpu_vas_below(high));
+    }
+
     /// A frame target on this device's Metal device: `width` x `height` pixels of `format`,
     /// each 1 to 16384 ([`Error::InvalidArgument`] otherwise). It holds no reference to the
     /// device.

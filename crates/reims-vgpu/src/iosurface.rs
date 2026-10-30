@@ -113,6 +113,13 @@ impl<P: Platform> IoSurfaceDevice<P> {
             self.inner.mmio_write(offset, value);
         });
     }
+
+    /// After a saved state's load: maps again every surface the guest's descriptors mark mapped,
+    /// once the registers are written again (the descriptor enable and base first); returns how
+    /// many slots hold a surface. May block on the device's worker.
+    pub fn remap_surfaces(&self) -> u32 {
+        entry::run(|_| self.inner.remap_surfaces())
+    }
 }
 
 #[cfg(test)]

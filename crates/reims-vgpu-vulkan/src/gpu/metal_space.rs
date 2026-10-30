@@ -999,6 +999,11 @@ pub struct MetalSpace {
     elements: Elements,
     /// Metal's mempool of sampler descriptors ([`Samplers`]).
     samplers: Samplers,
+    /// Ours: where a plain range may start, [`BASE`] (or 0, the same) until the guest's ranges
+    /// were kept for its pins ([`MetalSpace::keep_freed_for_pins`]).
+    floor: u64,
+    /// Ours: the end of the highest range ever held.
+    high: u64,
 }
 
 impl MetalSpace {
@@ -1019,7 +1024,34 @@ impl MetalSpace {
                 array: 0,
                 held: Holding::Nothing,
             },
+            floor: BASE,
+            high: 0,
         }
+    }
+
+    /// Ours: a resume begins ([`Platform::resuming`]), the guest's tasks gone with their ranges
+    /// while its placements still name them: a plain range now starts past every range held so
+    /// far, and what lies below is left to the pins the guest makes again as it makes each
+    /// resource again, in an order of its own. Metal would hand a freed range out again
+    /// (`vaprobe reuse`), first to whatever came first, a plain range of the resume's included.
+    ///
+    /// [`Platform::resuming`]: reims_vgpu_core::platform::Platform::resuming
+    pub fn keep_freed_for_pins(&mut self) {
+        self.keep_below(self.high);
+    }
+
+    /// Ours: the end of the highest range ever held.
+    pub const fn high(&self) -> u64 {
+        self.high
+    }
+
+    /// Ours: a plain range now starts at `high` or past it: a saved state's load, in a process
+    /// that may be a new one, holds none of the ranges the state's placements name, up to the
+    /// state's [`MetalSpace::high`]. The start may rise, and never falls.
+    pub fn keep_below(&mut self, high: u64) {
+        self.floor = self
+            .floor
+            .max(high.checked_next_multiple_of(SLOT).unwrap_or(END));
     }
 
     /// The device's heap, held from the space's first use: Metal makes it with the device.
@@ -1206,6 +1238,15 @@ impl MetalSpace {
         Some((pages, span))
     }
 
+    /// The held run that holds `address`, if any.
+    fn run_at(&self, address: u64) -> Option<Range<u64>> {
+        self.held
+            .range(..=address)
+            .next_back()
+            .filter(|(_, end)| **end > address)
+            .map(|(&start, &end)| start..end)
+    }
+
     /// The first held byte of `range`, if any.
     fn first_held(&self, range: &Range<u64>) -> Option<u64> {
         // Runs never overlap, so the runs reaching into the range are the last ones that start
@@ -1218,9 +1259,10 @@ impl MetalSpace {
             .map(|(&start, _)| start.max(range.start))
     }
 
-    /// The lowest [`SLOT`]-aligned start from [`BASE`] where `span` bytes are free.
+    /// The lowest [`SLOT`]-aligned start from [`BASE`] (from the floor, ours, once the guest's
+    /// freed ranges are kept for its pins) where `span` bytes are free.
     fn lowest_gap(&self, span: u64) -> Option<u64> {
-        let mut at = BASE;
+        let mut at = self.floor.max(BASE);
         for (&start, &end) in &self.held {
             if end <= at {
                 continue;
@@ -1244,6 +1286,7 @@ impl MetalSpace {
         let start = self.lowest_gap(span)?;
         let end = start.checked_add(span)?;
         self.held.insert(start, end);
+        self.high = self.high.max(end);
         let pages_end = start.checked_add(pages)?;
         Some(Held {
             address: start,
@@ -1275,6 +1318,7 @@ impl MetalSpace {
             return Err(PinRefused::Held { requested, held });
         }
         self.held.insert(first, span_end);
+        self.high = self.high.max(span_end);
         Ok(Held {
             address,
             pages: first..end,
@@ -1785,7 +1829,21 @@ pub fn placing(length: u64, bytes: Bytes, pin: Option<u64>) -> (rt::AddressPlace
     }
     let mut space = process();
     let placed = match pin {
-        Some(address) => space.pin(address, length).ok().map(|held| (address, held)),
+        Some(address) => match space.pin(address, length) {
+            Ok(held) => Some((address, held)),
+            Err(refused) => {
+                let run = match &refused {
+                    PinRefused::Held { held, .. } => space.run_at(*held),
+                    _ => None,
+                };
+                log::debug!(
+                    "pin at {address:#x} of {length:#x} bytes refused: {refused:?}, the held run \
+                     {run:x?}, the floor {:#x}",
+                    space.floor
+                );
+                None
+            }
+        },
         None => {
             let offset = match bytes {
                 Bytes::NoCopy(offset) => offset & (PAGE - 1),
@@ -3531,6 +3589,37 @@ mod tests {
         space.release(a);
         space.release(b);
         assert_eq!(space.place(PAGE).unwrap().address(), START);
+    }
+
+    /// Ours: once a resume keeps them for pins, freed ranges are passed over by a plain range,
+    /// which goes past every range held so far, and taken again by their pins.
+    #[test]
+    fn a_resume_keeps_freed_ranges_for_pins() {
+        let mut space = MetalSpace::brought_up();
+        let a = space.place(PAGE).unwrap();
+        let b = space.place(PAGE).unwrap();
+        let c = space.place(PAGE).unwrap();
+        let (at, bt, end) = (a.address(), b.address(), c.guard().end);
+        space.release(a);
+        space.release(b);
+        space.release(c);
+        space.keep_freed_for_pins();
+        assert_eq!(space.place(PAGE).unwrap().address(), end);
+        assert_eq!(space.pin(bt, PAGE).unwrap().address(), bt);
+        assert_eq!(space.pin(at, PAGE).unwrap().address(), at);
+    }
+
+    /// Ours: a new process that loads a state places plain ranges past the state's high, and
+    /// the state's pins below it are free; the start never falls.
+    #[test]
+    fn a_load_keeps_the_ranges_below_the_states_high() {
+        let mut space = MetalSpace::brought_up();
+        let high = START + 0x10_0000;
+        space.keep_below(high);
+        assert_eq!(space.place(PAGE).unwrap().address(), high);
+        assert_eq!(space.pin(START, PAGE).unwrap().address(), START);
+        space.keep_below(START);
+        assert!(space.place(PAGE).unwrap().address() > high);
     }
 
     #[test]
