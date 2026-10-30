@@ -281,7 +281,10 @@ pub fn create<T>(
     match inside(Some(sel), call) {
         Ok(v) => Ok(Some(v)),
         Err(Error::Nil(_)) => Ok(None),
-        Err(e) if nil.covers(&e) => Ok(None),
+        Err(e) if nil.covers(&e) => {
+            log::debug!("{sel}: nil for the runtime's refusal: {e}");
+            Ok(None)
+        }
         Err(e) => decide(sel, policy, e),
     }
 }

@@ -865,5 +865,38 @@ pub unsafe extern "C" fn rvg_device_did_resume(device: *mut RvgDevice) {
     })
 }
 
+/// The end of the highest GPU VA range this process has held: keep it with the state
+/// rvg_device_finish_suspend gives, for rvg_device_keep_gpu_vas_below. 0 on a platform that places
+/// none.
+///
+/// # Safety
+/// `device` is a live device handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rvg_device_gpu_va_high(device: *mut RvgDevice) -> u64 {
+    ffi::export(|| {
+        // SAFETY: the caller's contract.
+        unsafe { live(device, "rvg_device_gpu_va_high") }
+            .device
+            .gpu_va_high()
+    })
+}
+
+/// A saved state's load, before anything of the guest's is made again, in a process that may be a
+/// new one: plain GPU VA ranges now go from `high` (rvg_device_gpu_va_high when the state was
+/// saved) on, as the state's placements name the ranges below it and the guest pins each again as
+/// it makes its resources again.
+///
+/// # Safety
+/// `device` is a live device handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rvg_device_keep_gpu_vas_below(device: *mut RvgDevice, high: u64) {
+    ffi::export(|| {
+        // SAFETY: the caller's contract.
+        unsafe { live(device, "rvg_device_keep_gpu_vas_below") }
+            .device
+            .keep_gpu_vas_below(high);
+    })
+}
+
 #[cfg(test)]
 mod tests;

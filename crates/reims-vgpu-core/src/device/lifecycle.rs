@@ -186,6 +186,9 @@ impl<P: Platform> DeviceCore<P> {
             root.drain();
         }
         {
+            // Ours: the detached heaps made so far release their GPU VA ranges as they drop,
+            // which a resume in this process has the guest pin again.
+            crate::resources::heap::detach::tasks_torn_down(&self.platform);
             let mut tasks = self.tasks.lock();
             // A real pool and a holder around the walk, under the task lock. What the tasks'
             // flushes hold deep in the walk (a page-table read's device handle), under the walk's
@@ -334,6 +337,8 @@ impl<P: Platform> DeviceCore<P> {
     ) -> bool {
         log::info!("device resuming");
         self.run_state.store(RunState::LeavingSuspendEarly);
+        // Ours: the platform keeps the guest's freed GPU VA ranges for its pins.
+        self.platform.resuming();
         let Some(bytes) = state else {
             set_error(error, RESUME_ERROR_INVALID_CONTENT.cast_unsigned());
             return false;

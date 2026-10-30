@@ -257,6 +257,9 @@ impl<P: Platform> DeviceCore<P> {
     /// Reading and emptying it with no lock at all would be a race with no defined outcome; the
     /// sequential outcomes are kept.
     pub fn teardown_tasks(&self) {
+        // Ours: the detached heaps made so far release their GPU VA ranges as they drop, which a
+        // load after this reset has the guest pin again.
+        crate::resources::heap::detach::tasks_torn_down(&self.platform);
         // A real pool: the host's synchronous callbacks reached inside it (the tasks' teardowns,
         // and their releases) autorelease into it.
         let pool = crate::rt::Pool::push(self.platform.as_ref());

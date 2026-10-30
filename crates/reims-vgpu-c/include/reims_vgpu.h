@@ -899,6 +899,23 @@ RvgStatus rvg_device_will_resume(RvgDevice *device,
 // `device` is a live device handle.
 void rvg_device_did_resume(RvgDevice *device);
 
+// The end of the highest GPU VA range this process has held: keep it with the state
+// rvg_device_finish_suspend gives, for rvg_device_keep_gpu_vas_below. 0 on a platform that places
+// none.
+//
+// # Safety
+// `device` is a live device handle.
+uint64_t rvg_device_gpu_va_high(RvgDevice *device);
+
+// A saved state's load, before anything of the guest's is made again, in a process that may be a
+// new one: plain GPU VA ranges now go from `high` (rvg_device_gpu_va_high when the state was
+// saved) on, as the state's placements name the ranges below it and the guest pins each again as
+// it makes its resources again.
+//
+// # Safety
+// `device` is a live device handle.
+void rvg_device_keep_gpu_vas_below(RvgDevice *device, uint64_t high);
+
 // A new display on `device`. Refusals, checked in this order: RVG_ERR_INVALID_ARGUMENT,
 // RVG_ERR_UNSUPPORTED, RVG_ERR_PORT_OUT_OF_RANGE, RVG_ERR_METAL, RVG_ERR_SERIAL_IN_USE,
 // RVG_ERR_PORT_IN_USE. The display keeps the device alive. May call back.
@@ -1060,6 +1077,16 @@ uint64_t rvg_iosurface_device_mmio_read(RvgIOSurfaceDevice *device, uint64_t off
 // # Safety
 // `device` is a live IOSurface device handle.
 void rvg_iosurface_device_mmio_write(RvgIOSurfaceDevice *device, uint64_t offset, uint64_t value);
+
+// After a saved state's load, before the guest runs: maps again every surface whose guest
+// descriptor is marked mapped. The guest's memory comes back with its mappings, while a reset
+// device has none; write the registers again first (the read counter, the descriptor enable,
+// the descriptor base, then the ring). Returns how many surfaces the device holds after it. May
+// block on the IOSurface device's thread.
+//
+// # Safety
+// `device` is a live IOSurface device handle.
+uint32_t rvg_iosurface_device_remap_surfaces(RvgIOSurfaceDevice *device);
 
 // Tells the device the guest wrote `dirty`, inside a range add_trace_range watches. Any thread,
 // except inside add_trace_range. NULL does nothing.

@@ -187,5 +187,25 @@ pub unsafe extern "C" fn rvg_iosurface_device_mmio_write(
     })
 }
 
+/// After a saved state's load, before the guest runs: maps again every surface whose guest
+/// descriptor is marked mapped. The guest's memory comes back with its mappings, while a reset
+/// device has none; write the registers again first (the read counter, the descriptor enable,
+/// the descriptor base, then the ring). Returns how many surfaces the device holds after it. May
+/// block on the IOSurface device's thread.
+///
+/// # Safety
+/// `device` is a live IOSurface device handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rvg_iosurface_device_remap_surfaces(
+    device: *mut RvgIOSurfaceDevice,
+) -> u32 {
+    ffi::export(|| {
+        // SAFETY: the caller's contract.
+        unsafe { live(device, "rvg_iosurface_device_remap_surfaces") }
+            .device
+            .remap_surfaces()
+    })
+}
+
 #[cfg(test)]
 mod tests;

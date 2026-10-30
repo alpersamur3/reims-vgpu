@@ -637,6 +637,21 @@ impl Platform for VulkanPlatform {
     fn host_blocks(&self, blocks: HostBlocks) -> HostBlocks {
         remap::reporting(blocks, Arc::new(device::host_range_remapped))
     }
+
+    /// Ours: the space keeps the guest's freed ranges for the pins a resume makes again.
+    fn resuming(&self) {
+        crate::gpu::metal_space::process().keep_freed_for_pins();
+    }
+
+    /// Ours: the end of the highest range the space has held.
+    fn gpu_va_high(&self) -> u64 {
+        crate::gpu::metal_space::process().high()
+    }
+
+    /// Ours: the space places plain ranges from `high` on.
+    fn keep_gpu_vas_below(&self, high: u64) {
+        crate::gpu::metal_space::process().keep_below(high);
+    }
 }
 
 /// The private `MTLResourceAddressRangeArray *`: the ranges, as the array copies them, which a
