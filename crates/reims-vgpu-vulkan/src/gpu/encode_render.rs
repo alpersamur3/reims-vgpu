@@ -1932,6 +1932,15 @@ fn make(
                         ),
                     )
                 }
+                // Ours: as `new_render_pipeline_state_from_descriptor` answers a state into it:
+                // nil, the command buffer's work on it faulted, the emulator alive.
+                e if crate::gpu::desc::is_format_refusal(&e)
+                    && (d.color_attachments.iter().filter_map(|c| c.texture.as_ref()))
+                        .any(|t| t.pixel_format() == PixelFormat::RGB84442P) =>
+                {
+                    log::warn!("{sel}: a pass into RGB8_444_2P refused: {e}");
+                    Ok(None)
+                }
                 e => {
                     if crate::gpu::desc::is_format_refusal(&e) {
                         crate::gpu::ycbcr::pass_refused(sel, &d, &e);
