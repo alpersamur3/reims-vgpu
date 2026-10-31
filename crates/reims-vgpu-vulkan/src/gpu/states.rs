@@ -769,7 +769,23 @@ pub(crate) fn new_render_pipeline_state_from_descriptor(
         sel,
         timing::RENDER_LATER,
         || {
-            let state = plain_at(sel, || device.raw.new_render_pipeline_state(&d, &options))
+            let state = plain_at(sel, || device.raw.new_render_pipeline_state(&d, &options));
+            // Ours: iOS 26 draws into `RGB8_444_2P` over its `_RB4` surfaces in a form the runtime
+            // has no store for. The guest hears an error and goes without that draw, where a
+            // death here ended the emulator a few seconds after Home and a page swipe.
+            if let Err(e) = &state
+                && crate::gpu::desc::is_format_refusal(e)
+                && (d.color_attachments.iter().flatten())
+                    .any(|c| c.pixel_format == metal2vulkan::metal::PixelFormat::RGB84442P)
+            {
+                log::warn!("{sel}: a state into RGB8_444_2P refused: {}", render_formats(&d));
+                return Ok(Err(NsErrorText {
+                    domain: crate::answer::RUNTIME_DOMAIN.to_owned(),
+                    code: 2,
+                    description: "a state into RGB8_444_2P the runtime has no store for".to_owned(),
+                }));
+            }
+            let state = state
                 .map_err(|e| {
                     let colors = d.color_attachments.map(|c| c.map(|c| c.pixel_format));
                     let depth = (d.depth_format, d.stencil_format);
