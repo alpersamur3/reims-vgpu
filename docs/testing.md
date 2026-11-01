@@ -2598,7 +2598,9 @@ are invalid there. Highlights (the full table is the main loop's dispatch in
 - Wrong or odd checks, to lock (section 7): **0x6a** decodes as
   SetDepthStoreAction, not SetDepthStoreActionOptions (whose decoder is dead);
   **0x8e** bounds a fragment sampler index by maxVertexSamplers; **0x91** bounds
-  a primitive-restart index by maxViewportCount; **0x96** requires index `<`
+  a primitive-restart index by maxViewportCount (not kept by the Windows port:
+  the guest's OpenGL ES renderer sends 0xffffffff with its draws, which the
+  bound faulted); **0x96** requires index `<`
   maxColorAttachmentIndex, so with only attachment 0 bound index 0 always fails
   (0x66 and 0x67 use `>`). The 0x8e bound cannot show on the suite's host: both
   sampler limits are 16, and 0x8d and 0x8e fault at every index there anyway,
@@ -3829,7 +3831,7 @@ to fix: changing one is a change of behaviour, made on purpose and reviewed
 | The protection envelope's inner header length is not applied; a failed read skips the segment silently | **measured**, `exec_protection_envelope` | encoder type 5 |
 | `ObjectLists::set_object_list` validates the *previous* offsets' alignment | **measured**, `tasks_objlist_placement` | opcodes 51, 68 |
 | The in-process copy (`tasks/local/memory.rs`) rejects `end >= taskLength`; the service accepts `end == taskLength` | **measured**, `tasks_objlist_record_at_end`, `exec_range_at_task_end` (in-process a command buffer there kills the host) | ranges and records ending at the task's end |
-| Render 0x6a decodes as SetDepthStoreAction; 0x8e bounds by maxVertexSamplers; 0x91 by maxViewportCount; 0x96 uses `>=` against the max colour index | **read**; 0x8e cannot show on the suite's host (section 6.16) | render commands |
+| Render 0x6a decodes as SetDepthStoreAction; 0x8e bounds by maxVertexSamplers; 0x91 by maxViewportCount; 0x96 uses `>=` against the max colour index | **read**; 0x8e cannot show on the suite's host (section 6.16); the Windows port drops 0x91's bound, which faulted every OpenGL ES draw (AppleMetalGLRenderer sends index 0xffffffff) | render commands |
 | Render primitive types 5-9 pass validation (5, 6 draw; 7, 8 draw nothing; 9 faults on the GPU); index type is not validated | **measured**, `render_draw_odd_types`, `render_draw_type9` | draws |
 | Render 0x0b zero-extends its 16-bit base vertex; 0x1d sign-extends | **measured**, `render_draw_indexed` | draws |
 | Render 0x16 always throws "unsupported" | **measured**, `render_state_misc` | render |
