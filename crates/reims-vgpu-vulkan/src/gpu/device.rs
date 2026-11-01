@@ -1437,12 +1437,21 @@ impl GpuDevice<VulkanPlatform> for VulkanDevice {
     /// (type 0) and sampler states (1) in the runtime's spaces, which number them as Metal does,
     /// indirect command buffers (5) in the numbers this platform gives them and, below 2^23, in the
     /// runtime's, which park the thread for good where Metal spins and die where Metal goes on to
-    /// hand out IDs twice ([`crate::gpu::icb`]). The runtime takes only a space's first call with
-    /// an ID, before the space handed out one, and ignores any other, as Metal does; a call holding
-    /// an ID of 2^32 or more it drops whole, leaving the reservation to a later call, as Metal
-    /// does. An ID the runtime refuses dies: a texture or sampler state ID of 2^28 or more, which
-    /// ended Metal's process, or a texture ID past what the device's texture arrays hold, which
-    /// Metal takes; so does any other type, which core never reserves.
+    /// hand out IDs twice ([`crate::gpu::icb`]). A call holding an ID of 2^32 or more the runtime
+    /// drops whole, leaving the reservation to a later call, as Metal does. An ID the runtime
+    /// refuses dies: a texture or sampler state ID of 2^28 or more, which ended Metal's process,
+    /// or a texture ID past what the device's texture arrays hold, which Metal takes; so does any
+    /// other type, which core never reserves.
+    ///
+    /// Ours: textures and sampler states are kept whenever the call comes (the runtime's
+    /// `keep_resource_ids`), where Metal takes only a space's first call with an ID, before the
+    /// space handed out one. Every task shares this one device (`open_device`), and a task's
+    /// reservation is that of the objects a loaded state placed (core's `reserve_objects`): on
+    /// Apple an isolated task's device is its own process's, so the reservation is its first
+    /// call, and here it came after the other tasks' and the cold boot's allocations and was
+    /// ignored, and new textures took IDs restored ones are placed at (a load into a cold-booted
+    /// process: 75 plain IDs and 37 placements given while a live texture held the slot, against
+    /// 1 placement with the keeps).
     fn reserve_resource_indices(&self, resource_type: u64, indices: &[u64]) -> RaiseResult<()> {
         let sel = "reserveResourceIndicesForResourceType:indices:indexCount:";
         let kind = match resource_type {
@@ -1452,9 +1461,7 @@ impl GpuDevice<VulkanPlatform> for VulkanDevice {
             other => unrepresentable(sel, &format!("resource type {other}")),
         };
         let ids: Vec<rt::ResourceId> = indices.iter().map(|&id| rt::ResourceId(id)).collect();
-        send(sel, Policy::Dies, || {
-            self.raw.reserve_resource_ids(kind, &ids)
-        })
+        send(sel, Policy::Dies, || self.raw.keep_resource_ids(kind, &ids))
     }
 
     /// Metal's description of the format at the device's Metal level, the runtime's
