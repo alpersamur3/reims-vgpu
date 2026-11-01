@@ -874,22 +874,18 @@ impl<P: Platform> RenderDecoder<P> {
         })
     }
 
-    /// 0x91. Bounded by `maxViewportCount`.
+    /// 0x91. The index is the strips' restart index, passed on whatever it is. Apple's
+    /// deserializer bounds it by `maxViewportCount` (read, docs/testing.md sections 6.16 and
+    /// 7.1), but the guest's OpenGL ES renderer (AppleMetalGLRenderer) sends 0xffffffff with its
+    /// draws, so that bound faulted every OpenGL ES draw; this port does not keep it.
     pub(super) fn set_primitive_restart_index_enabled(
         &mut self,
         c: &mut Cursor,
     ) -> RaiseResult<()> {
         let command: CmdSetPrimitiveRestartEnabledIndex = c.read_or_raise(OnFault::Return)?;
-        let index = u64::from(command.index);
-        if index >= self.device_limit(|c| c.limits.max_viewport_count) {
-            crate::raise!(
-                RaiseKind::ViewportIndex,
-                format_args!("primitive restart index {index} is past the device's viewports")
-            );
-        }
         self.send(RenderCmd::SetPrimitiveRestartEnabled {
             enabled: command.enabled != 0,
-            index,
+            index: u64::from(command.index),
         })
     }
 
@@ -1835,18 +1831,15 @@ mod tests {
             "setPrimitiveRestartEnabled:index:",
             vec![Arg::Bool(true), Arg::U64(1)],
         );
-        // Bounded by maxViewportCount.
+        // Not bounded by maxViewportCount, as Apple's is: AppleMetalGLRenderer's 0xffffffff.
         {
             let mut r = Rig::new();
             r.set_caps(|c| c.limits.max_viewport_count = 3);
-            assert_raise(
-                f(&mut r.dec, &mut cursor(&at(0, 3))),
-                RaiseKind::ViewportIndex,
-                "primitive restart index 3 is past the device's viewports",
+            f(&mut r.dec, &mut cursor(&at(0, 0xffff_ffff))).unwrap();
+            assert_eq!(
+                r.encoder_calls()[0].1,
+                vec![Arg::Bool(false), Arg::U64(0xffff_ffff)]
             );
-            assert!(r.sels().is_empty());
-            f(&mut r.dec, &mut cursor(&at(0, 2))).unwrap();
-            assert_eq!(r.encoder_calls()[0].1, vec![Arg::Bool(false), Arg::U64(2)]);
         };
     }
 

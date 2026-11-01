@@ -101,8 +101,6 @@ pub enum RaiseKind {
     TextureCount,
     /// More viewports or scissor rects than the device's `maxViewportCount`.
     ViewportCount,
-    /// A primitive-restart index at or past the device's `maxViewportCount`.
-    ViewportIndex,
     /// A per-buffer attribute stride on a device without dynamic attribute strides.
     AttributeStrideUnsupported,
     /// A clip plane index of 6 or more.
@@ -153,7 +151,6 @@ impl RaiseKind {
             RaiseKind::SamplerIndex => "deserializer.render.sampler_index",
             RaiseKind::TextureCount => "deserializer.render.texture_count",
             RaiseKind::ViewportCount => "deserializer.render.viewport_count",
-            RaiseKind::ViewportIndex => "deserializer.render.viewport_index",
             RaiseKind::AttributeStrideUnsupported => {
                 "deserializer.render.attribute_stride_unsupported"
             }
