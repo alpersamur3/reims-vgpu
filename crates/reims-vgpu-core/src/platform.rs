@@ -183,6 +183,14 @@ pub trait Platform: Sized + Send + Sync + 'static {
     /// The device with `registry_id` (+1), or `None`: in one process, the instance the host's own
     /// device is.
     fn open_device(&self, registry_id: u64) -> Option<Self::Device>;
+    /// The device a GPU task makes its objects on, of `device`, the one its handshake opened
+    /// ([`Platform::open_device`]): `device` itself, unless the platform gives each task a space
+    /// of texture resource IDs of its own on the one device (the Vulkan platform's runtime does),
+    /// so that a task's placed texture IDs never meet another task's textures, as each guest
+    /// process's met none on its own Metal device.
+    fn task_device(&self, device: Self::Device) -> Self::Device {
+        device
+    }
 
     // Services.
     /// IOSurface creation.

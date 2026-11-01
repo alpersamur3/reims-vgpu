@@ -71,7 +71,8 @@ impl<P: Platform> GpuTask<P> {
         let p = &*self.platform;
         let _lock = self.handshake_lock.lock();
         let pid = std::process::id().cast_signed();
-        let device = p.open_device(configuration.registry_id).map(Arc::new);
+        let device = (p.open_device(configuration.registry_id))
+            .map(|device| Arc::new(p.task_device(device)));
         *self.device.lock() = device.as_deref().map(Handle::clone_ref);
         if device.is_none() {
             log::error!(
