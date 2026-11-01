@@ -2,8 +2,9 @@
 //! at once, then replaced by the guest's address ranges at the first CPU prepare (which frees
 //! the allocation). A discard detaches it again.
 //!
-//! A cover buffer over the whole heap answers where a buffer is expected, and is never released,
-//! but after the device's teardown of every task ([`tasks_torn_down`]).
+//! A cover buffer over the whole heap answers where a buffer is expected, and is never released
+//! before the device's teardown of every task ([`tasks_torn_down`]), which releases the ones kept
+//! until then.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -12,7 +13,7 @@ use crate::guest::GuestPtr;
 use crate::host::HostPtr;
 use crate::num::ToU64;
 use crate::platform::device::GpuDevice;
-use crate::platform::resource::Heap;
+use crate::platform::resource::{Buffer as _, Heap};
 use crate::platform::types::ResourceAddressRange;
 use crate::platform::values::{HeapDesc, OptionSet};
 use crate::platform::{Handle, Platform};
@@ -30,7 +31,18 @@ use crate::rt::Hold;
 use crate::sync::Mutex;
 
 /// Ours: the platforms, by address, whose device has torn every task down ([`tasks_torn_down`]).
+/// Taken before [`KEPT_COVERS`] wherever both are.
 static TORN_DOWN: parking_lot::Mutex<Vec<usize>> = parking_lot::Mutex::new(Vec::new());
+
+/// A cover buffer kept until its platform's device tears every task down.
+type KeptCover = Box<dyn std::any::Any + Send>;
+
+/// Ours: the cover buffers of detached heaps that dropped before their platform's device tore every
+/// task down, by platform address, each with its heap and GPU VA range (Metal's sub-allocation
+/// retain): held as Metal's numbering has them, and released at that teardown
+/// ([`tasks_torn_down`]).
+static KEPT_COVERS: parking_lot::Mutex<Vec<(usize, KeptCover)>> =
+    parking_lot::Mutex::new(Vec::new());
 
 fn platform_key<P>(platform: &Arc<P>) -> usize {
     Arc::as_ptr(platform).cast::<()>().addr()
@@ -41,23 +53,60 @@ fn platform_key<P>(platform: &Arc<P>) -> usize {
 /// on a detached heap that drops, made before or after, releases its cover buffer, and with it
 /// the heap and its GPU VA range, whenever and however that drop comes (the last command buffer
 /// that holds the heap may complete after the teardown; the guest deletes heaps after a resume);
-/// before it every drop keeps the cover for good, as Metal's numbering has it. A saved state's
-/// placements keep its heaps' VAs, and a resume or load in the same process, which Metal's hosts
-/// never make, has the guest pin each one again, which a range still held refuses (`Metal made no
-/// heap`, then every command on the heap faults): a heap the guest deleted after a save and
-/// before a load of it holds one of them. The numbering past a teardown is not a fresh
-/// process's anyway.
+/// before it every drop keeps the cover, as Metal's numbering has it, and this first teardown
+/// releases them all. A saved state's placements keep its heaps' VAs, and a resume or load in the
+/// same process, which Metal's hosts never make, has the guest pin each one again, which a range
+/// still held refuses (`Metal made no heap`, then every command on the heap faults): a heap the
+/// guest deleted after a save and before a load of it held one of them, and so did a heap a
+/// cold-booted process deleted before a state saved by another process was loaded into it (the
+/// VAs start at the same address in every process, so the two processes' ranges meet: such a
+/// load refused 184 pins and faulted 57 execs while the covers were kept for good, none once
+/// this teardown released them). The numbering past a teardown is not a fresh process's anyway.
 pub(crate) fn tasks_torn_down<P>(platform: &Arc<P>) {
     let key = platform_key(platform);
-    let mut t = TORN_DOWN.lock();
-    if !t.contains(&key) {
-        t.push(key);
+    let released: Vec<(usize, KeptCover)> = {
+        let mut t = TORN_DOWN.lock();
+        if !t.contains(&key) {
+            t.push(key);
+        }
+        let mut kept = KEPT_COVERS.lock();
+        let (mine, others) = std::mem::take(&mut *kept)
+            .into_iter()
+            .partition(|(k, _)| *k == key);
+        *kept = others;
+        mine
+    };
+    if !released.is_empty() {
+        log::info!(
+            "released {} cover buffers of detached heaps dropped before the device tore its tasks \
+             down",
+            released.len()
+        );
     }
+    // Out of the locks: a release reaches Metal.
+    drop(released);
 }
 
-/// Whether `platform`'s device has torn every task down ([`tasks_torn_down`]).
-fn torn_down<P>(platform: &Arc<P>) -> bool {
-    TORN_DOWN.lock().contains(&platform_key(platform))
+/// The cover buffer of a detached heap that drops: released once `platform`'s device has torn
+/// every task down, kept until it does before ([`tasks_torn_down`]). The test and the keeping are
+/// one step under [`TORN_DOWN`]'s lock, so a cover never misses the teardown that would release it.
+fn drop_cover<P: Platform>(platform: &Arc<P>, cover: P::Buffer, length: u64) {
+    let key = platform_key(platform);
+    let release = {
+        let t = TORN_DOWN.lock();
+        if t.contains(&key) {
+            Some(cover)
+        } else {
+            log::debug!(
+                "the cover buffer of a detached heap of {length:#x} bytes at {:#x} is kept until \
+                 the device tears its tasks down",
+                cover.gpu_address()
+            );
+            KEPT_COVERS.lock().push((key, Box::new(cover)));
+            None
+        }
+    };
+    drop(release);
 }
 
 /// A heap whose backing is detached until the guest's address ranges replace it.
@@ -318,14 +367,10 @@ impl<P: Platform> ResourceClass<P> for DetachHeapResource<P> {
 
 impl<P: Platform> Drop for DetachHeapResource<P> {
     fn drop(&mut self) {
-        // The cover buffer is never released, and with it (Metal's sub-allocation retain) the heap
-        // and its GPU VA range; but once the device has torn every task down.
+        // The cover buffer is kept, and with it (Metal's sub-allocation retain) the heap and its
+        // GPU VA range, until the device tears every task down (`drop_cover`).
         if let Some(b) = self.cover_buffer.take() {
-            if torn_down(&self.platform) {
-                drop(b);
-            } else {
-                keep_forever(b, Kept::MetalNumbering);
-            }
+            drop_cover(&self.platform, b, self.length);
         }
         drop(self.heap.take());
         let dummy = *self.dummy_allocation.get_mut();
@@ -671,8 +716,8 @@ mod tests {
 
         #[test]
         fn last_release_leaks_the_cover_buffer_and_frees_the_dummy() {
-            // The cover buffer is never released, and so (by Metal's sub-allocation retain) neither
-            // is the heap's GPU VA range.
+            // The cover buffer is not released before the device's teardown, and so (by Metal's
+            // sub-allocation retain) neither is the heap's GPU VA range.
             let env = Env::new();
             let r = heap(&env, 0, None).unwrap();
             let cover = r.get_buffer().unwrap().unwrap();
@@ -706,6 +751,28 @@ mod tests {
             assert_eq!(cover.retain_count(), c0 - 1, "made before: released");
             assert_eq!(after_cover.retain_count(), a0 - 1, "made after: released");
             assert_eq!(other_cover.retain_count(), o0, "another platform's kept");
+        }
+
+        /// Ours: a cover kept by a heap that dropped before the teardown is released by the
+        /// teardown, and so is its GPU VA range, which a state loaded after it may pin; another
+        /// platform's kept cover stays kept, and a second teardown releases nothing more.
+        #[test]
+        fn a_teardown_releases_the_covers_kept_before_it() {
+            let env = Env::new();
+            let other = Env::new();
+            let r = heap(&env, 0, None).unwrap();
+            let o = heap(&other, 0, None).unwrap();
+            let cover = r.get_buffer().unwrap().unwrap();
+            let other_cover = o.get_buffer().unwrap().unwrap();
+            let (c0, o0) = (cover.retain_count(), other_cover.retain_count());
+            drop(r);
+            drop(o);
+            assert_eq!(cover.retain_count(), c0, "kept before the teardown");
+            tasks_torn_down(&env.p);
+            assert_eq!(cover.retain_count(), c0 - 1, "released by the teardown");
+            assert_eq!(other_cover.retain_count(), o0, "another platform's kept");
+            tasks_torn_down(&env.p);
+            assert_eq!(cover.retain_count(), c0 - 1, "released once");
         }
     }
 }
