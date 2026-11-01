@@ -249,6 +249,24 @@ pub fn adopt(sel: &'static str, raw: rt::Device) -> VulkanDevice {
     made
 }
 
+/// The handle a GPU task makes its objects on, of `device`, the process's ([`adopt`]): a new
+/// object over a new texture scope of the runtime device (`rt::Device::with_own_texture_ids`), so
+/// that the task's textures take their resource IDs from a space of the task's own, as each guest
+/// process's took them from its own Metal device, and its placements (`reserve_resource_indices`,
+/// the textures placed at the guest's IDs) meet no other task's textures. Everything else is the
+/// process's device: the registry ID, the capabilities (read once, through the process's handle),
+/// every other space of IDs, and the objects, which any handle of the device takes (a buffer over
+/// a surface shares the range of another task's, [`DeviceObject::live_surface_buffer`]).
+pub fn task_device(device: &VulkanDevice) -> VulkanDevice {
+    let caps = OnceLock::new();
+    let _ = caps.set(device.caps());
+    Obj::new(DeviceObject {
+        raw: device.raw.with_own_texture_ids(),
+        registry_id: device.registry_id,
+        caps,
+    })
+}
+
 /// Tells every device made in the process that the pages under the `length` host bytes at
 /// `bytes` were replaced (`rt::Device::host_range_remapped`, [`crate::remap`]): a no-copy buffer
 /// made over any of them after this imports the pages there then. Not a Metal call, so it never
@@ -665,14 +683,15 @@ impl VulkanDevice {
     }
 
     /// A live buffer of this device over the surface `key` at its range's address
-    /// ([`SURFACE_BUFFERS`]), forgetting those gone.
+    /// ([`SURFACE_BUFFERS`]), forgetting those gone: of any handle of the device, a task's
+    /// ([`task_device`]) or the process's, by the registry ID they share.
     fn live_surface_buffer(&self, key: u64) -> Option<VulkanBuffer> {
         let mut surfaces = SURFACE_BUFFERS.lock();
         let buffers = surfaces.get_mut(&key)?;
         buffers.retain(|buffer| buffer.strong_count() > 0);
         let live = (buffers.iter())
             .filter_map(Obj::upgrade)
-            .find(|buffer| buffer.device.id() == self.id());
+            .find(|buffer| buffer.device.registry_id == self.registry_id);
         if buffers.is_empty() {
             surfaces.remove(&key);
         }

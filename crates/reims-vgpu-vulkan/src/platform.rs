@@ -608,6 +608,11 @@ impl Platform for VulkanPlatform {
             .map(|raw| device::adopt("MTLCopyAllDevices()", raw))
     }
 
+    /// A handle of `device` over a texture scope of the task's own ([`device::task_device`]).
+    fn task_device(&self, device: VulkanDevice) -> VulkanDevice {
+        device::task_device(&device)
+    }
+
     fn surfaces(&self) -> &dyn IoSurfaces<VulkanPlatform> {
         &self.surfaces
     }
