@@ -993,6 +993,9 @@ pub struct MetalSpace {
     device: bool,
     /// Metal's own allocations made ([`FirstUse`]).
     own: BTreeSet<Own>,
+    /// The ranges of Metal's own allocations that are no pool, held for good until a resume
+    /// lets them go ([`MetalSpace::let_own_ranges_go`]).
+    own_ranges: Vec<Held>,
     /// Metal's pools of small allocations, in the order it made them ([`PoolClass`]).
     pools: Vec<Pool>,
     /// Metal's mempool of texture descriptors ([`Elements`]).
@@ -1004,6 +1007,31 @@ pub struct MetalSpace {
     floor: u64,
     /// Ours: the end of the highest range ever held.
     high: u64,
+    /// Ours, for the log: what holds each run, by its first byte ([`Whose`]).
+    whose: BTreeMap<u64, Whose>,
+    /// Ours, for the log: the spans the resumes let go ([`MetalSpace::let_own_ranges_go`]).
+    let_go: Vec<(Range<u64>, Option<Whose>)>,
+}
+
+/// Ours, for the log: what holds a run of the space.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Whose {
+    /// The device's heap.
+    Device,
+    /// One of Metal's own allocations ([`FirstUse`]).
+    Own(Own),
+    /// A pool of small allocations a slot made ([`PoolClass`]).
+    Pool(PoolClass),
+    /// One of Metal's descriptor arrays ([`Elements`], [`Samplers`]).
+    Array,
+    /// A texture of its own memory.
+    Texture,
+    /// A surface.
+    Surface,
+    /// A plain buffer's or heap's.
+    Plain,
+    /// A guest's pin.
+    Pin,
 }
 
 impl MetalSpace {
@@ -1013,6 +1041,7 @@ impl MetalSpace {
             held: BTreeMap::new(),
             device: false,
             own: BTreeSet::new(),
+            own_ranges: Vec::new(),
             pools: Vec::new(),
             elements: Elements {
                 live: 0,
@@ -1026,7 +1055,26 @@ impl MetalSpace {
             },
             floor: BASE,
             high: 0,
+            whose: BTreeMap::new(),
+            let_go: Vec::new(),
         }
+    }
+
+    /// Ours, for the log: `held`'s run is `whose`'s.
+    fn tag(&mut self, held: Option<&Held>, whose: Whose) {
+        if let Some(held) = held {
+            self.whose.insert(held.pages.start, whose);
+        }
+    }
+
+    /// Ours, for the log: every run held, with what holds it.
+    fn runs(&self) -> String {
+        let mut out = String::new();
+        for (start, end) in &self.held {
+            let whose = self.whose.get(start);
+            out.push_str(&format!(" {start:#x}..{end:#x} {whose:?};"));
+        }
+        out
     }
 
     /// Ours: a resume begins ([`Platform::resuming`]), the guest's tasks gone with their ranges
@@ -1034,10 +1082,54 @@ impl MetalSpace {
     /// far, and what lies below is left to the pins the guest makes again as it makes each
     /// resource again, in an order of its own. Metal would hand a freed range out again
     /// (`vaprobe reuse`), first to whatever came first, a plain range of the resume's included.
+    /// The ranges of Metal's own that are the model's alone go too
+    /// ([`MetalSpace::let_own_ranges_go`]).
     ///
     /// [`Platform::resuming`]: reims_vgpu_core::platform::Platform::resuming
     pub fn keep_freed_for_pins(&mut self) {
         self.keep_below(self.high);
+        self.let_own_ranges_go();
+        log::debug!(
+            "resuming: the floor {:#x}, {} runs held:{}",
+            self.floor,
+            self.held.len(),
+            self.runs()
+        );
+    }
+
+    /// Ours, at a resume: the ranges of Metal's own allocations that are no pool
+    /// ([`FirstUse`]) and of the descriptor arrays ([`Elements`], [`Samplers`]) held no more, so
+    /// the guest's pins may take them. The runtime makes nothing at them (a pool's range is the
+    /// runtime's reservation while a buffer lies in it, so the pools stay), so a pin there is
+    /// made. Each process puts them where its own history did: a cold-booted process whose first
+    /// compute encoder came late held that encoder's three ranges at 0x100_05a0_0000, where a
+    /// state another process saved (its first compute encoder early) had the guest's buffers,
+    /// and refused their pins (the resources nil, every command that named one faulting, a GPU
+    /// restart each). What a later first use or array takes goes past the floor, with every
+    /// plain range.
+    fn let_own_ranges_go(&mut self) {
+        let mut gone = std::mem::take(&mut self.own_ranges);
+        let arrays = self.elements.arrays.iter_mut();
+        for holding in arrays.chain(std::iter::once(&mut self.samplers.held)) {
+            if let Holding::Range(_) = holding
+                && let Holding::Range(held) = std::mem::take(holding)
+            {
+                gone.push(held);
+            }
+        }
+        let let_go: Vec<_> = (gone.iter())
+            .map(|held| {
+                (
+                    held.pages.start..held.guard.end,
+                    self.whose.get(&held.pages.start).copied(),
+                )
+            })
+            .collect();
+        log::debug!("resuming: let go of Metal's own {let_go:x?}");
+        // A load resumes twice (the device's resume, then the surfaces'), the second with
+        // nothing left to let go: the spans the first let go stay on the list.
+        self.let_go.extend(let_go);
+        gone.into_iter().for_each(|held| self.release(held));
     }
 
     /// Ours: the end of the highest range ever held.
@@ -1052,6 +1144,7 @@ impl MetalSpace {
         self.floor = self
             .floor
             .max(high.checked_next_multiple_of(SLOT).unwrap_or(END));
+        log::debug!("keep below {high:#x}: the floor {:#x}", self.floor);
     }
 
     /// The device's heap, held from the space's first use: Metal makes it with the device.
@@ -1060,6 +1153,7 @@ impl MetalSpace {
             self.device = true;
             let (_, span) = MetalSpace::plain_span(DEVICE_HEAP).unwrap_or_default();
             self.held.insert(BASE, BASE + span);
+            self.whose.insert(BASE, Whose::Device);
         }
     }
 
@@ -1102,13 +1196,16 @@ impl MetalSpace {
         for own in allocations(first) {
             if self.own.insert(own) {
                 let held = self.place(own.bytes());
+                self.tag(held.as_ref(), Whose::Own(own));
                 let class = match own {
                     Own::SharedPool => Some(PoolClass::Shared),
                     Own::PrivatePool => Some(PoolClass::Private),
                     _ => None,
                 };
-                if let (Some(class), Some(held)) = (class, held) {
-                    self.pools.push(Pool::new(class, held, true));
+                match (class, held) {
+                    (Some(class), Some(held)) => self.pools.push(Pool::new(class, held, true)),
+                    (None, Some(held)) => self.own_ranges.push(held),
+                    (_, None) => {}
                 }
             }
         }
@@ -1150,7 +1247,9 @@ impl MetalSpace {
         let (pool, offset) = match found {
             Some(found) => found,
             None => {
-                let mut pool = Pool::new(class, self.place(POOL_BYTES)?, false);
+                let held = self.place(POOL_BYTES)?;
+                self.tag(Some(&held), Whose::Pool(class));
+                let mut pool = Pool::new(class, held, false);
                 let found = (pool.held.address(), pool.take(bytes)?);
                 self.pools.push(pool);
                 found
@@ -1192,6 +1291,9 @@ impl MetalSpace {
             true => self.slot(PoolClass::Shared, bytes).map(Holding::Slot),
             false => self.place(bytes).map(Holding::Range),
         };
+        if let Some(Holding::Range(held)) = &made {
+            self.whose.insert(held.pages.start, Whose::Array);
+        }
         made.unwrap_or(Holding::Nothing)
     }
 
@@ -1286,6 +1388,7 @@ impl MetalSpace {
         let start = self.lowest_gap(span)?;
         let end = start.checked_add(span)?;
         self.held.insert(start, end);
+        self.whose.insert(start, Whose::Plain);
         self.high = self.high.max(end);
         let pages_end = start.checked_add(pages)?;
         Some(Held {
@@ -1318,7 +1421,16 @@ impl MetalSpace {
             return Err(PinRefused::Held { requested, held });
         }
         self.held.insert(first, span_end);
+        self.whose.insert(first, Whose::Pin);
         self.high = self.high.max(span_end);
+        let taken =
+            (self.let_go.iter()).filter(|(span, _)| span.start < span_end && first < span.end);
+        for (span, whose) in taken {
+            log::debug!(
+                "pin at {address:#x} of {length:#x} bytes takes {span:x?} ({whose:?}), let go at \
+                 the resume"
+            );
+        }
         Ok(Held {
             address,
             pages: first..end,
@@ -1339,7 +1451,10 @@ impl MetalSpace {
         self.texture_made();
         let made = match texture_space(kind) {
             TextureSpace::None | TextureSpace::Surface => None,
-            TextureSpace::Own(bytes) => self.place(bytes).map(Holding::Range),
+            TextureSpace::Own(bytes) => self.place(bytes).map(|held| {
+                self.whose.insert(held.pages.start, Whose::Texture);
+                Holding::Range(held)
+            }),
             TextureSpace::Slot { class, bytes } => self.slot(class, bytes).map(Holding::Slot),
         };
         made.unwrap_or(Holding::Nothing)
@@ -1351,13 +1466,16 @@ impl MetalSpace {
     /// texture's, which the library's queues, made as it starts, make moot.
     pub fn place_surface(&mut self, alloc_size: u64) -> Option<Held> {
         self.first_use(FirstUse::Texture);
-        self.place(alloc_size)
+        let held = self.place(alloc_size);
+        self.tag(held.as_ref(), Whose::Surface);
+        held
     }
 
     /// `held`'s resource released, or never made after all: its whole span free again, a
     /// pin's as a plain range's.
     pub fn release(&mut self, held: Held) {
         self.held.remove(&held.pages.start);
+        self.whose.remove(&held.pages.start);
     }
 }
 
@@ -1836,9 +1954,10 @@ pub fn placing(length: u64, bytes: Bytes, pin: Option<u64>) -> (rt::AddressPlace
                     PinRefused::Held { held, .. } => space.run_at(*held),
                     _ => None,
                 };
+                let whose = run.as_ref().and_then(|run| space.whose.get(&run.start));
                 log::debug!(
                     "pin at {address:#x} of {length:#x} bytes refused: {refused:?}, the held run \
-                     {run:x?}, the floor {:#x}",
+                     {run:x?} ({whose:?}), the floor {:#x}",
                     space.floor
                 );
                 None
@@ -3607,6 +3726,44 @@ mod tests {
         assert_eq!(space.place(PAGE).unwrap().address(), end);
         assert_eq!(space.pin(bt, PAGE).unwrap().address(), bt);
         assert_eq!(space.pin(at, PAGE).unwrap().address(), at);
+    }
+
+    /// Ours: a resume lets Metal's own ranges that are no pool go, and the descriptor arrays',
+    /// so a state's pins take them; the pools stay held, and what a later first use or array
+    /// takes goes past the floor.
+    #[test]
+    fn a_resume_leaves_metals_own_ranges_to_pins() {
+        let mut space = MetalSpace::brought_up();
+        let a = space.place(PAGE).unwrap();
+        space.first_use(FirstUse::ComputeEncoder);
+        (0..256).for_each(|_| space.texture_made());
+        let mut own: Vec<u64> = space.own_ranges.iter().map(Held::address).collect();
+        let arrays = space
+            .elements
+            .arrays
+            .iter()
+            .filter_map(|holding| match holding {
+                Holding::Range(held) => Some(held.address()),
+                _ => None,
+            });
+        own.extend(arrays);
+        // The pool heap, seven of the compute encoder's and two arrays of a page.
+        assert_eq!(own.len(), 10);
+        let pool = space.pools[0].held.address();
+        space.release(a);
+        space.keep_freed_for_pins();
+        let floor = space.floor;
+        for at in own {
+            assert_eq!(space.pin(at, PAGE).unwrap().address(), at, "{at:#x}");
+        }
+        assert!(space.pin(pool, PAGE).is_err());
+        space.first_use(FirstUse::BlitCommand);
+        (0..256).for_each(|_| space.texture_made());
+        assert!(space.own_ranges.iter().all(|held| held.address() >= floor));
+        assert!(space.elements.arrays.iter().all(|holding| match holding {
+            Holding::Range(held) => held.address() >= floor,
+            _ => true,
+        }));
     }
 
     /// Ours: a new process that loads a state places plain ranges past the state's high, and
