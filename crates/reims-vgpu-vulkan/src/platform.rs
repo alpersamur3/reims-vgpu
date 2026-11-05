@@ -339,9 +339,78 @@ pub(crate) fn device_options() -> &'static rt::DeviceOptions {
                 rt::ShaderCacheOptions::in_directory(PathBuf::from(home).join(SHADER_CACHE));
         }
         options.shader_cache.capacity = SHADER_CACHE_CAPACITY;
+        let var = |name| std::env::var(name).ok();
+        options.withhold_generated_commands = switched_off(
+            GENERATED_COMMANDS_VAR,
+            var(GENERATED_COMMANDS_VAR).as_deref(),
+        );
+        options.withhold_view_reinterpretation =
+            switched_off(VIEW_REINTERPRET_VAR, var(VIEW_REINTERPRET_VAR).as_deref());
+        options.kinds = device_kinds(var(DEVICE_VAR).as_deref());
         options
     });
     &OPTIONS
+}
+
+/// `0`, `false`, `no` or `off` withholds `VK_EXT_device_generated_commands` from every device
+/// (`DeviceOptions::withhold_generated_commands`): an execution of commands a kernel writes then
+/// takes the runtime's host step, and every answer is the same. For a driver that lists the
+/// extension but misbehaves with it; the runtime itself makes a device again without it where the
+/// driver refuses one that enables it. Unset, the runtime enables it where the device can use it.
+pub const GENERATED_COMMANDS_VAR: &str = "REIMS_VGPU_GENERATED_COMMANDS";
+
+/// `0`, `false`, `no` or `off` makes no Vulkan view of an image in another component layout, on
+/// any device (`DeviceOptions::withhold_view_reinterpretation`): such a texture view holds its
+/// texels apart, in a shadow the encoders copy (announced as a shadowed texture view). A
+/// diagnostic, for a driver whose views of another layout read wrong texels.
+pub const VIEW_REINTERPRET_VAR: &str = "REIMS_VGPU_VIEW_REINTERPRET";
+
+/// The kinds of physical device the platform may take, comma-separated (`DeviceOptions::kinds`):
+/// `discrete`, `integrated`, `virtual` and `cpu`. Unset or empty, every kind, discrete first. A
+/// host with an integrated and a discrete GPU runs on the integrated one with `integrated`. A
+/// name of no kind changes nothing, and a line on stderr says so.
+pub const DEVICE_VAR: &str = "REIMS_VGPU_DEVICE";
+
+/// Whether `value`, `var`'s, switches it off: `0`, `false`, `no` or `off`, any case, spaces
+/// around it ignored. Another value is the default, and a line on stderr says so.
+fn switched_off(var: &str, value: Option<&str>) -> bool {
+    let Some(value) = value.map(str::trim).filter(|v| !v.is_empty()) else {
+        return false;
+    };
+    if ["0", "false", "no", "off"]
+        .iter()
+        .any(|off| value.eq_ignore_ascii_case(off))
+    {
+        return true;
+    }
+    let line = format!("reims-vgpu: {var} is {value:?}, not 0, false, no or off: ignored\n");
+    let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
+    false
+}
+
+/// The device kinds [`DEVICE_VAR`]'s `value` names, in its order; none admits every kind.
+fn device_kinds(value: Option<&str>) -> Vec<rt::DeviceKind> {
+    let mut kinds = Vec::new();
+    for name in (value.unwrap_or_default().split(',').map(str::trim)).filter(|n| !n.is_empty()) {
+        let kind = match name.to_ascii_lowercase().as_str() {
+            "discrete" => rt::DeviceKind::Discrete,
+            "integrated" => rt::DeviceKind::Integrated,
+            "virtual" => rt::DeviceKind::Virtual,
+            "cpu" => rt::DeviceKind::Cpu,
+            _ => {
+                let line = format!(
+                    "reims-vgpu: {DEVICE_VAR} names {name:?}, none of discrete, integrated, \
+                     virtual, cpu: ignored\n"
+                );
+                let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
+                continue;
+            }
+        };
+        if !kinds.contains(&kind) {
+            kinds.push(kind);
+        }
+    }
+    kinds
 }
 
 /// The fields of the runtime's device policy (`metal2vulkan::device::DevicePolicy`) whose exact
@@ -810,6 +879,43 @@ pub(crate) mod tests {
         assert_eq!(answers, but_sampling);
         assert_eq!(exact_policy(Some("sampling, all")), every);
         assert_eq!(exact_policy(Some("all,sampling")), every);
+    }
+
+    /// `REIMS_VGPU_GENERATED_COMMANDS` and `REIMS_VGPU_VIEW_REINTERPRET` switch off at `0`,
+    /// `false`, `no` or `off` in any case and spacing; unset, empty or any other value keeps the
+    /// runtime's default
+    #[test]
+    fn a_switch_is_off_only_at_an_off_value() {
+        for off in ["0", "false", "no", "off", " OFF ", "No", "False"] {
+            assert!(switched_off(GENERATED_COMMANDS_VAR, Some(off)), "{off:?}");
+        }
+        for kept in [
+            None,
+            Some(""),
+            Some("  "),
+            Some("1"),
+            Some("on"),
+            Some("disable"),
+        ] {
+            assert!(!switched_off(VIEW_REINTERPRET_VAR, kept), "{kept:?}");
+        }
+    }
+
+    /// `REIMS_VGPU_DEVICE` names device kinds in its order, once each, in any case and spacing;
+    /// a name of no kind is skipped; unset or empty admits every kind
+    #[test]
+    fn reims_vgpu_device_names_the_kinds() {
+        use rt::DeviceKind::{Cpu, Discrete, Integrated, Virtual};
+        assert_eq!(device_kinds(None), vec![]);
+        assert_eq!(device_kinds(Some(" , ")), vec![]);
+        assert_eq!(device_kinds(Some("integrated")), vec![Integrated]);
+        assert_eq!(device_kinds(Some(" Discrete ")), vec![Discrete]);
+        assert_eq!(
+            device_kinds(Some("cpu,virtual,integrated,discrete,cpu")),
+            vec![Cpu, Virtual, Integrated, Discrete]
+        );
+        assert_eq!(device_kinds(Some("igpu,integrated")), vec![Integrated]);
+        assert_eq!(device_kinds(Some("igpu")), vec![]);
     }
 
     /// Obj: clone_ref() is another reference to the same object, and the last drop releases it
