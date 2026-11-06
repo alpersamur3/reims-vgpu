@@ -44,6 +44,7 @@ use reims_vgpu_core::platform::os::vm::{HostAddr, HostVm, KernReturn, VmProt};
 use reims_vgpu_core::raise::death::{DeathId, DeathKind, fatal_with_detail};
 
 use super::budget;
+use super::deferred;
 use super::files::{self, Backing};
 
 /// `KERN_INVALID_ADDRESS`.
@@ -471,6 +472,7 @@ impl HostVm for LinuxVm {
         if length == 0 {
             return Ok(());
         }
+        deferred::release(first, length);
         anonymous(Some(first), length, "allocate_fixed_overwrite")?;
         files::forget(first, length);
         Ok(())
@@ -498,6 +500,10 @@ impl HostVm for LinuxVm {
             );
             return Err(INVALID_ADDRESS);
         };
+        // Into a deferred view, recorded unmapped (`super::deferred`).
+        if deferred::remap(target, length, &pieces) {
+            return Ok(dst);
+        }
         budget::admit(mappings_added(&pieces), "a view of guest pages");
         for (done, piece) in pieces.iter().enumerate() {
             if let Err(kr) = file(
@@ -525,6 +531,9 @@ impl HostVm for LinuxVm {
             return Ok(());
         }
         let bits = prot_bits(prot);
+        if deferred::protect(first, length, bits) {
+            return Ok(());
+        }
         // SAFETY: lowering or raising a range's protection is the caller's decision; a later
         // access it forbids faults (a process death).
         if unsafe { libc::mprotect(ptr(first), length.to_usize(), bits) } != 0 {
@@ -550,6 +559,7 @@ impl HostVm for LinuxVm {
             );
             return INVALID_ARGUMENT;
         }
+        deferred::release(first, length);
         files::forget(first, length);
         // SAFETY: the range is one core allocated and no longer uses (its owner's drop).
         if unsafe { libc::munmap(ptr(first), length.to_usize()) } != 0 {

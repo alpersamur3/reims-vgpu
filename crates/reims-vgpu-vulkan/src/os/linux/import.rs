@@ -37,6 +37,7 @@ use reims_vgpu_core::platform::os::vm::{HostAddr, KernReturn};
 use reims_vgpu_core::sync::Mutex;
 
 use super::budget;
+use super::deferred;
 use super::files;
 use super::vm;
 
@@ -71,6 +72,9 @@ pub(super) fn zeros(fd: &Arc<OwnedFd>) -> bool {
 pub(crate) struct ImportView {
     at: NonNull<u8>,
     twin: Option<Twin>,
+    /// A deferred view with a read-only page, which the runtime gathers from the guest's
+    /// writable RAM: the GPU's writes reach its pages, as through a twin (`super::deferred`).
+    kept: bool,
 }
 
 /// A writable twin's address range, unmapped when it drops.
@@ -101,7 +105,7 @@ impl ImportView {
     /// Whether the GPU's writes through the import are kept where Metal drops them: it is a twin
     /// of memory mapped read-only, the guest's pages or zeros (module docs).
     pub(crate) fn writes_kept(&self) -> bool {
-        self.twin.is_some()
+        self.twin.is_some() || self.kept
     }
 
     /// The runtime's deallocator of the import, and what keeps the import's memory mapped beside
@@ -142,6 +146,12 @@ impl ImportView {
 pub(crate) unsafe fn host_memory(at: NonNull<u8>) -> rt::HostMemory {
     // An earlier import's refusal is not this one's.
     REFUSAL.with_borrow_mut(|kept| *kept = None);
+    // A deferred view's bytes are gathered from the guest's RAM (`super::deferred`).
+    if deferred::holds(at.as_ptr().addr().to_u64(), 1) {
+        // SAFETY: the caller's; the source answers the view's pages, the guest's RAM, which the
+        // host keeps mapped for the device's life.
+        return unsafe { rt::HostMemory::with_gather(at, deferred::gather_source()) };
+    }
     let source: rt::DmaBufSource = Arc::new(|request: rt::DmaBufRequest| {
         let first = shown_at(request.start).as_ptr().addr().to_u64();
         let (length, granule) = (request.length, request.granule);
@@ -194,7 +204,11 @@ impl SendPtr {
 /// refuses any import there), and otherwise a writable twin of their pages, at the same offset in
 /// its first page (module docs).
 pub(crate) fn import_view(at: NonNull<u8>, length: u64) -> ImportView {
-    let plain = ImportView { at, twin: None };
+    let plain = ImportView {
+        at,
+        twin: None,
+        kept: false,
+    };
     let start = at.as_ptr().addr().to_u64();
     let page = vm::page_size();
     let first = start & !(page - 1);
@@ -207,6 +221,16 @@ pub(crate) fn import_view(at: NonNull<u8>, length: u64) -> ImportView {
     let Some(pieces) = files::pieces(first, end - first) else {
         return plain;
     };
+    // A deferred view takes no twin: the runtime gathers its pages from the guest's RAM, which
+    // the GPU writes through whatever the view's protection.
+    if deferred::holds(first, end - first) {
+        let kept = !pieces.iter().all(|p| p.prot & libc::PROT_WRITE != 0);
+        return ImportView {
+            at,
+            twin: None,
+            kept,
+        };
+    }
     log::debug!(
         "an import of {length:#x} bytes at {start:#x}: {} runs of files",
         twin_mappings(&pieces)
@@ -223,6 +247,7 @@ pub(crate) fn import_view(at: NonNull<u8>, length: u64) -> ImportView {
     ImportView {
         at: twin_at,
         twin: Some(twin),
+        kept: false,
     }
 }
 

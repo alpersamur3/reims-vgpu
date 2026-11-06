@@ -48,6 +48,17 @@ pub(crate) use host_os::{
     Drawables, METAL_LEVEL, TWINS_READ_ONLY, allocate_aliasable, allocate_zeros, dma_buf_refusal,
     host_memory, import_view, plane_shape, shown_at, surface_memory_hold,
 };
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub(crate) use linux::allocate_deferred;
+
+/// No deferred views on this OS: the caller's own range (`os/linux/deferred.rs`).
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+pub(crate) fn allocate_deferred(
+    _spans: &[(u64, u64)],
+    _length: u64,
+) -> Option<reims_vgpu_core::platform::os::vm::HostAddr> {
+    None
+}
 pub use host_os::{
     GuestMemoryLease, OsClock, OsSurface, OsSurfaces, OsThreads, OsVm, default_gpu_core_count,
     default_registry_id, install_process_services, lease_guest_memory,

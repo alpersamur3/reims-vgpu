@@ -26,6 +26,11 @@
 //! them, and splits a mapping where part of it is unmapped or protected apart, as the table cuts
 //! its runs, so the count follows every view, protect and unmap. Registrations map nothing.
 //!
+//! **Deferred runs** ([`record_deferred`]) are runs of a deferred view (`super::deferred`): the
+//! table knows the file behind each byte, but the kernel maps none of it until the CPU first
+//! touches the bytes, so they take no mapping and are never joined; a materialized stretch of
+//! them is a plain run again ([`set_deferred`]).
+//!
 //! The table is a leaf lock: nothing is called under it.
 
 use std::collections::BTreeMap;
@@ -53,15 +58,19 @@ struct Run {
     end: u64,
     backing: Backing,
     prot: i32,
+    /// A deferred view's run, which the kernel does not map (module docs).
+    deferred: bool,
 }
 
-/// A registration: `first..end` shows `backing`, read and write, `count` times registered.
+/// A registration: `first..end` shows `backing`, read and write, `count` times registered;
+/// `guest` for the guest's RAM (a `guest_memory` lease), whose mapping lives as long as the host.
 #[derive(Debug)]
 struct Registered {
     first: u64,
     end: u64,
     backing: Backing,
     count: usize,
+    guest: bool,
 }
 
 /// One piece of a range as the table resolves it: `length` bytes, `at` bytes into the range,
@@ -81,6 +90,8 @@ struct Table {
     runs: BTreeMap<u64, Run>,
     /// The pairs of neighbouring runs the kernel holds as one mapping ([`joined`]).
     joins: usize,
+    /// The deferred runs, which take no mapping.
+    deferred: usize,
 }
 
 /// The process's table.
@@ -88,13 +99,16 @@ static TABLE: Mutex<Table> = Mutex::new(Table {
     registered: Vec::new(),
     runs: BTreeMap::new(),
     joins: 0,
+    deferred: 0,
 });
 
 /// Whether the kernel holds the run `a` from `a_first` and the run `b` from `b_first` as one
 /// mapping: `b` starts where `a` ends, in the same file at the offset `a` ends at, with the same
 /// protection (module docs).
 fn joined(a_first: u64, a: &Run, b_first: u64, b: &Run) -> bool {
-    a.end == b_first
+    !a.deferred
+        && !b.deferred
+        && a.end == b_first
         && Arc::ptr_eq(&a.backing.fd, &b.backing.fd)
         && a.backing.offset + (a.end - a_first) == b.backing.offset
         && a.prot == b.prot
@@ -103,7 +117,7 @@ fn joined(a_first: u64, a: &Run, b_first: u64, b: &Run) -> bool {
 impl Table {
     /// The kernel's mappings the runs take (module docs).
     fn mappings(&self) -> usize {
-        self.runs.len() - self.joins
+        self.runs.len() - self.joins - self.deferred
     }
 
     /// How many of the runs on either side of `first..run.end` join a run there ([`joined`]).
@@ -118,6 +132,7 @@ impl Table {
     /// Adds a run over bytes no run holds, counting the neighbours it joins.
     fn insert(&mut self, first: u64, run: Run) {
         self.joins += self.joins_beside(first, &run);
+        self.deferred += usize::from(run.deferred);
         self.runs.insert(first, run);
     }
 
@@ -125,6 +140,7 @@ impl Table {
     fn remove(&mut self, first: u64) -> Option<Run> {
         let run = self.runs.remove(&first)?;
         self.joins -= self.joins_beside(first, &run);
+        self.deferred -= usize::from(run.deferred);
         Some(run)
     }
 
@@ -166,11 +182,38 @@ impl Table {
         }
     }
 
-    /// `first..end` shows `backing` with protection `prot` from now on (`record`).
-    fn record(&mut self, first: u64, end: u64, backing: Backing, prot: i32) {
+    /// `first..end` shows `backing` with protection `prot` from now on (`record`), mapped by
+    /// the kernel or `deferred`.
+    fn record(&mut self, first: u64, end: u64, backing: Backing, prot: i32, deferred: bool) {
         self.forget(first, end);
         if first < end {
-            self.insert(first, Run { end, backing, prot });
+            let run = Run {
+                end,
+                backing,
+                prot,
+                deferred,
+            };
+            self.insert(first, run);
+        }
+    }
+
+    /// What of the runs lies in `first..end` is `deferred` from now on, cut at its ends.
+    fn set_deferred(&mut self, first: u64, end: u64, deferred: bool) {
+        let meeting: Vec<(u64, Run)> = (self.runs.range(..end).rev())
+            .take_while(|(_, run)| run.end > first)
+            .map(|(&at, run)| (at, run.clone()))
+            .collect();
+        for (at, run) in meeting {
+            if run.deferred == deferred {
+                continue;
+            }
+            let (from, to) = (at.max(first), run.end.min(end));
+            self.forget(from, to);
+            let mut changed = run.clone();
+            changed.end = to;
+            changed.backing.offset = run.backing.offset + (from - at);
+            changed.deferred = deferred;
+            self.insert(from, changed);
         }
     }
 
@@ -206,6 +249,10 @@ pub(crate) fn mappings_between(first: u64, end: u64) -> u64 {
     let mut count = 0u64;
     let mut before: Option<(u64, &Run)> = None;
     for (&at, run) in table.runs.range(first..end) {
+        if run.deferred {
+            before = None;
+            continue;
+        }
         if !before.is_some_and(|(b_at, b)| joined(b_at, b, at, run)) {
             count += 1;
         }
@@ -219,7 +266,39 @@ pub(crate) fn mappings_between(first: u64, end: u64) -> u64 {
 pub(crate) fn record(first: u64, length: u64, backing: Backing, prot: i32) {
     TABLE
         .lock()
-        .record(first, first.saturating_add(length), backing, prot);
+        .record(first, first.saturating_add(length), backing, prot, false);
+}
+
+/// `length` bytes from `first`, in a deferred view, show `backing` from now on, with protection
+/// `prot`, unmapped by the kernel (module docs): what of another run they cover goes.
+pub(crate) fn record_deferred(first: u64, length: u64, backing: Backing, prot: i32) {
+    TABLE
+        .lock()
+        .record(first, first.saturating_add(length), backing, prot, true);
+}
+
+/// What of the runs lies in `length` bytes from `first` is mapped by the kernel from now on (a
+/// materialized stretch of a deferred view), or no more where `deferred`.
+pub(crate) fn set_deferred(first: u64, length: u64, deferred: bool) {
+    TABLE
+        .lock()
+        .set_deferred(first, first.saturating_add(length), deferred);
+}
+
+/// Where the guest's RAM shows the `length` bytes of `backing`: the host address of their first
+/// byte, and the first byte and length of the registration of the guest's RAM that holds them
+/// all (`lease_guest_memory`); `None` where no such registration holds them.
+pub(crate) fn guest_place(backing: &Backing, length: u64) -> Option<(u64, u64, u64)> {
+    let end = backing.offset.checked_add(length)?;
+    let table = TABLE.lock();
+    let r = table.registered.iter().find(|r| {
+        r.guest
+            && Arc::ptr_eq(&r.backing.fd, &backing.fd)
+            && r.backing.offset <= backing.offset
+            && end <= r.backing.offset + (r.end - r.first)
+    })?;
+    let host = r.first + (backing.offset - r.backing.offset);
+    Some((host, r.first, r.end - r.first))
 }
 
 /// `length` bytes from `first` show no file from now on.
@@ -302,6 +381,11 @@ impl Registration {
     /// Registers `length` bytes from `first` as showing `backing`: counted again where the same
     /// bytes are registered over the same file and offset.
     pub(crate) fn new(first: u64, length: u64, backing: Backing) -> Registration {
+        Registration::of(first, length, backing, false)
+    }
+
+    /// As [`Registration::new`]; `guest` for the guest's RAM.
+    fn of(first: u64, length: u64, backing: Backing, guest: bool) -> Registration {
         let end = first.saturating_add(length);
         let mut table = TABLE.lock();
         match table
@@ -315,6 +399,7 @@ impl Registration {
                 end,
                 backing: backing.clone(),
                 count: 1,
+                guest,
             }),
         }
         Registration {
@@ -344,7 +429,7 @@ pub fn lease_guest_memory(ranges: impl IntoIterator<Item = GuestRamFile>) -> Gue
                 fd: r.fd,
                 offset: r.offset,
             };
-            Registration::new(r.host, r.length, backing)
+            Registration::of(r.host, r.length, backing, true)
         })
         .collect();
     let guest_ram = registrations
@@ -352,6 +437,10 @@ pub fn lease_guest_memory(ranges: impl IntoIterator<Item = GuestRamFile>) -> Gue
         .map(|r| r.end - r.first)
         .fold(0u64, u64::saturating_add);
     super::budget::warn_if_short(guest_ram);
+    // The deferred views' fault handler, before QEMU's vCPUs run (`super::deferred`).
+    if super::deferred::enabled() {
+        super::deferred::install_handler();
+    }
     GuestMemoryLease {
         _registrations: registrations,
     }
@@ -521,12 +610,12 @@ mod tests {
         };
         // Four pages of one file in order: one mapping.
         for i in 0..4 {
-            t.record(at(i), at(i + 1), b(&f, i * page), rw);
+            t.record(at(i), at(i + 1), b(&f, i * page), rw, false);
         }
         assert_eq!(t.mappings(), 1);
         // A page of the file out of order after them, then a page of another file: three.
-        t.record(at(4), at(5), b(&f, 0x9000), rw);
-        t.record(at(5), at(6), b(&g, 0xa000), rw);
+        t.record(at(4), at(5), b(&f, 0x9000), rw, false);
+        t.record(at(5), at(6), b(&g, 0xa000), rw, false);
         assert_eq!(t.mappings(), 3);
         // The second page read-only cuts the first mapping in three; read and write again, one.
         t.protect(at(1), at(2), libc::PROT_READ);
@@ -536,10 +625,10 @@ mod tests {
         // An unmap of the second page cuts it in two; the page mapped again as it was, one.
         t.forget(at(1), at(2));
         assert_eq!(t.mappings(), 4);
-        t.record(at(1), at(2), b(&f, page), rw);
+        t.record(at(1), at(2), b(&f, page), rw, false);
         assert_eq!(t.mappings(), 3);
         // Another page of the file over the third: the first mapping in three.
-        t.record(at(2), at(3), b(&f, 0x20_000), rw);
+        t.record(at(2), at(3), b(&f, 0x20_000), rw, false);
         assert_eq!(t.mappings(), 5);
         t.forget(base, at(6));
         assert_eq!((t.mappings(), t.joins, t.runs.len()), (0, 0, 0));

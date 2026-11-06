@@ -1094,10 +1094,16 @@ pub(crate) fn gather(
     // The ranges' pages fill the alias from its start; zeros follow them.
     let pages = runs.last().map_or(0, |run| run.offset + run.length);
     let zero_block = read_only && crate::os::TWINS_READ_ONLY;
-    let at = if pages < length && !zero_block {
-        crate::os::allocate_aliasable(length)
-    } else {
-        vm.allocate_anywhere(length)
+    // An alias wholly of the guest's RAM is a deferred view where the OS has them: no kernel
+    // mapping of its runs until the CPU touches them (`os/linux/deferred.rs`).
+    let spans: Vec<(u64, u64)> = runs.iter().map(|run| (run.source, run.length)).collect();
+    let deferred = (pages == length)
+        .then(|| crate::os::allocate_deferred(&spans, length))
+        .flatten();
+    let at = match deferred {
+        Some(at) => Ok(at),
+        None if pages < length && !zero_block => crate::os::allocate_aliasable(length),
+        None => vm.allocate_anywhere(length),
     }
     .unwrap_or_else(|kr| refused_by_host(sel, "address space for an alias", length, kr));
     let alias = Alias {

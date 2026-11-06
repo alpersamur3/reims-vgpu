@@ -7,6 +7,7 @@
 
 mod budget;
 mod clock;
+mod deferred;
 mod dma_buf;
 mod files;
 mod hints;
@@ -31,6 +32,25 @@ pub(crate) use import::{
 };
 pub(crate) use surface::{plane_at, plane_shape, recorded_mut, surface_memory_hold, ycbcr_matrix};
 pub(crate) use vm::allocate_aliasable;
+
+/// A fresh deferred view of `length` bytes over the guest's pages `spans` (host addresses and
+/// lengths), whose runs the kernel maps only as the CPU touches them (`deferred`): `None` where
+/// deferred views are off, or a span is not the guest's RAM, for the caller's own range.
+pub(crate) fn allocate_deferred(
+    spans: &[(u64, u64)],
+    length: u64,
+) -> Option<reims_vgpu_core::platform::os::vm::HostAddr> {
+    if !deferred::enabled() {
+        return None;
+    }
+    if !spans
+        .iter()
+        .all(|&(first, len)| deferred::guest_backed(first, len))
+    {
+        return None;
+    }
+    deferred::allocate(length).ok()
+}
 #[cfg(test)]
 pub(crate) use vm::tests::{PAGE, mapped, writable};
 

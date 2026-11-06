@@ -390,7 +390,21 @@ fn checked_ranges(ranges: &[PhysicalMemoryRange], alloc_size: u64) -> Option<()>
 /// space, nothing left mapped.
 fn view(ranges: &[PhysicalMemoryRange], length: u64, read_only: bool) -> Option<u64> {
     let vm = LinuxVm::new();
-    let at = vm.allocate_anywhere(length).ok()?;
+    // Wholly of the guest's RAM: a deferred view (`super::deferred`).
+    let mut spans: Vec<(u64, u64)> = Vec::new();
+    let mut left = length;
+    for r in ranges {
+        if left == 0 {
+            break;
+        }
+        let now = r.physical_length.min(left);
+        spans.push((r.physical_address, now));
+        left -= now;
+    }
+    let at = match super::allocate_deferred(&spans, length) {
+        Some(at) => at,
+        None => vm.allocate_anywhere(length).ok()?,
+    };
     let mut offset = 0u64;
     for r in ranges {
         if offset >= length {
