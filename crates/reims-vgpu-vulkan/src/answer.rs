@@ -1635,9 +1635,13 @@ fn relay(message: &rt::DebugMessage) {
 /// gives a sink alone, goes to the log at debug instead, as the library's other diagnostics do:
 /// the runtime's line for each host import freed on a device that keeps MoltenVK's residency set
 /// (`metal2vulkan-host-import-freed`; this host's MoltenVK keeps it). A driver's or a layer's
-/// (`VK_EXT_debug_utils`), which the runtime reports to a sink alone, is dropped, as without one.
+/// (`VK_EXT_debug_utils`), which the runtime reports to a sink alone, is dropped, as without one,
+/// but for a driver's report of the device's loss ([`driver_loss_line`]).
 fn relay_to(w: &mut impl std::io::Write, severity: rt::MessageSeverity, id_name: &str, text: &str) {
     if !id_name.starts_with(RUNTIME_MESSAGES) {
+        if let Some(line) = driver_loss_line(id_name, text) {
+            let _ = w.write_all(line.as_bytes());
+        }
         return;
     }
     if severity == rt::MessageSeverity::Verbose {
@@ -1648,6 +1652,22 @@ fn relay_to(w: &mut impl std::io::Write, severity: rt::MessageSeverity, id_name:
     line.push('\n');
     // One write, so the line never interleaves with another thread's.
     let _ = w.write_all(line.as_bytes());
+}
+
+/// The line on stderr of a driver's message `text` (id name `id_name`) that reports the device
+/// lost, one line ending in a newline; `None` for any other. Mesa's drivers say why as they mark
+/// it (`vk_device_set_lost`, `vk_queue_set_lost`: "GPU faulted or hung", a refused submission
+/// or sparse bind with its `errno`), naming the result `VK_ERROR_DEVICE_LOST`, to the instance's
+/// messengers alone where the build logs nothing (Turnip over KGSL on Android): the runtime's
+/// own lines and the call that dies then say only that the device was lost.
+fn driver_loss_line(id_name: &str, text: &str) -> Option<String> {
+    if !text.contains("VK_ERROR_DEVICE_LOST") {
+        return None;
+    }
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    Some(format!(
+        "reims-vgpu: the Vulkan driver lost the device: {id_name}: {text}\n"
+    ))
 }
 
 /// The death at `call` of a degradation of [`DIES`], its line naming the notice.
@@ -2095,7 +2115,8 @@ mod tests {
     /// reservation's warning and its shader cache's warnings of an entry evicted and one not
     /// written, reach stderr's writer as the runtime writes them without a sink, a line each,
     /// unchanged, and so does a degradation it announces; its own `Verbose` line of a host import
-    /// freed goes to the log alone, and a layer's and a driver's are dropped
+    /// freed goes to the log alone, and a layer's and a driver's are dropped, but for a driver's
+    /// report of the device's loss, one line with its id name
     #[test]
     fn the_runtimes_own_messages_are_relayed_unchanged() {
         use rt::MessageSeverity as S;
@@ -2133,12 +2154,25 @@ mod tests {
                 "metal2vulkan-degrade-shadowed-texture",
                 degraded,
             ),
+            (
+                S::Warning,
+                "../src/freedreno/vulkan/tu_knl_kgsl.cc:1719",
+                "submit failed: Invalid argument\n (VK_ERROR_DEVICE_LOST)",
+            ),
+            (
+                S::Warning,
+                "../src/freedreno/vulkan/tu_knl_kgsl.cc:1001",
+                "a format the device lacks (VK_ERROR_FORMAT_NOT_SUPPORTED)",
+            ),
         ] {
             relay_to(&mut out, severity, id_name, text);
         }
+        let lost = "reims-vgpu: the Vulkan driver lost the device: \
+             ../src/freedreno/vulkan/tu_knl_kgsl.cc:1719: submit failed: Invalid argument \
+             (VK_ERROR_DEVICE_LOST)";
         assert_eq!(
             String::from_utf8(out).unwrap(),
-            format!("{creation}\n{late}\n{evicted}\n{unwritten}\n{degraded}\n")
+            format!("{creation}\n{late}\n{evicted}\n{unwritten}\n{degraded}\n{lost}\n")
         );
     }
 
