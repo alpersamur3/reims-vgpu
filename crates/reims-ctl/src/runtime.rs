@@ -44,7 +44,7 @@ fn alive(pid: i32) -> bool {
     r == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn cmdline(pid: i32) -> Option<Vec<u8>> {
     let b = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
     // A zombie's command line is empty.
@@ -88,7 +88,7 @@ fn cmdline(pid: i32) -> Option<Vec<u8>> {
     Some(buf)
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
 fn cmdline(_pid: i32) -> Option<Vec<u8>> {
     None
 }

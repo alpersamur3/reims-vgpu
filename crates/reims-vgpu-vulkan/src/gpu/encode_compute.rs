@@ -714,7 +714,7 @@ mod tests {
     /// by its reflection, or the buffer is made resident for writing: on Linux the runtime
     /// imports a writable twin of the pages, which the write would reach, where Metal's GPU drops
     /// it ([`crate::gpu::writes::kept_write`]). The pages stay zeros
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     #[test]
     fn a_dispatch_through_read_only_pages_dies_on_linux() {
         use reims_vgpu_core::platform::os::vm::HostVm as _;

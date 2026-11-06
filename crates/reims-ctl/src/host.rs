@@ -38,7 +38,7 @@ impl Host {
     pub fn current() -> Host {
         let os = if cfg!(target_os = "macos") {
             Os::Mac
-        } else if cfg!(target_os = "linux") {
+        } else if cfg!(any(target_os = "linux", target_os = "android")) {
             Os::Linux
         } else {
             Os::Other

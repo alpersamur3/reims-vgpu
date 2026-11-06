@@ -94,7 +94,7 @@ pub fn icd_files() -> Vec<PathBuf> {
 
 /// The host's GPUs, each with the driver manifest that reaches it.
 pub fn list() -> Vec<GpuInfo> {
-    if !cfg!(target_os = "linux") {
+    if !cfg!(any(target_os = "linux", target_os = "android")) {
         return Vec::new();
     }
     let Ok(exe) = std::env::current_exe() else {
@@ -193,7 +193,7 @@ fn probe(exe: &std::path::Path, file: &std::path::Path) -> Vec<GpuInfo> {
 }
 
 /// `reims-ctl __vulkan-probe`: one JSON line per physical device the loader finds.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 pub fn probe_main() -> i32 {
     use ash::vk;
     // SAFETY: loads the system's Vulkan loader; the calls below follow the API's rules.
@@ -236,7 +236,7 @@ pub fn probe_main() -> i32 {
     0
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
 pub fn probe_main() -> i32 {
     1
 }

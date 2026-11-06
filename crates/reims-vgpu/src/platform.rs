@@ -256,7 +256,7 @@ mod tests {
     /// The Vulkan platform's lease of the guest's RAM lets views be made of the pages the host
     /// names a file behind, showing the file from its offset, while it lives; never of a range
     /// without a file
-    #[cfg(all(feature = "vulkan", target_os = "linux"))]
+    #[cfg(all(feature = "vulkan", any(target_os = "linux", target_os = "android")))]
     #[test]
     fn the_vulkan_lease_lets_views_be_made_of_the_guests_ram() {
         use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};

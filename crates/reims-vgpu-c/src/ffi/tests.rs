@@ -8,7 +8,7 @@ use reims_vgpu_core::rt::is_our_thread;
 
 use super::*;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;

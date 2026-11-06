@@ -41,7 +41,7 @@ objc2-quartz-core = { workspace = true, features = ["CAMetalLayer", "objc2-metal
 reims-vgpu-core = { workspace = true, features = ["testkit"] }
 
 # The guest's RAM as a host maps it on Linux, a shared mapping of a file (`platform::tests`).
-[target.'cfg(target_os = "linux")'.dev-dependencies]
+[target.'cfg(any(target_os = "linux", target_os = "android"))'.dev-dependencies]
 libc.workspace = true
 
 # A swapchain over a layer of the test's own on macOS, its surface made with ash's types

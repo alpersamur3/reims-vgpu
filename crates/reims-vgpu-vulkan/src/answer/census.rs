@@ -41,7 +41,7 @@ const PERIOD: Duration = Duration::from_secs(30);
 pub const OUTSIDE: &str = "(outside every call)";
 
 /// Whether census mode can be on in this build: on Linux alone (module docs).
-const ON_THIS_OS: bool = cfg!(target_os = "linux");
+const ON_THIS_OS: bool = cfg!(any(target_os = "linux", target_os = "android"));
 
 /// The census's directory, read once per process ([`chosen`]).
 fn dir() -> Option<&'static Path> {
@@ -374,7 +374,7 @@ mod tests {
     /// The variable turns census mode on on Linux alone; unset or empty, it is off everywhere
     #[test]
     fn census_mode_is_linux_s_alone() {
-        let linux = cfg!(target_os = "linux");
+        let linux = cfg!(any(target_os = "linux", target_os = "android"));
         assert_eq!(
             chosen(Some("/census".to_owned())),
             linux.then(|| PathBuf::from("/census"))

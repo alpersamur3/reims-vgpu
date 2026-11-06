@@ -70,7 +70,7 @@ pub use reims_vgpu_vulkan::VulkanPlatform;
 #[cfg(target_os = "macos")]
 pub type DefaultPlatform = MetalPlatform;
 /// The platform every handle is made on by default: `VulkanPlatform` on Linux.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 pub type DefaultPlatform = VulkanPlatform;
 /// The platform every handle is made on by default: `VulkanPlatform` on Windows.
 #[cfg(windows)]

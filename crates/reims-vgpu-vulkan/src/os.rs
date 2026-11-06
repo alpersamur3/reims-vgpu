@@ -17,7 +17,7 @@
 //! its loader, and fetching an image's drawable ahead where the driver needs it
 //! (`Drawables`: MoltenVK's, on macOS).
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
@@ -26,7 +26,7 @@ mod surface;
 mod windows;
 mod wsi;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 use linux as host_os;
 #[cfg(target_os = "macos")]
 use macos as host_os;

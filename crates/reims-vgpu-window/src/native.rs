@@ -17,7 +17,7 @@
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "android"))]
 mod windows;
 
 #[cfg(target_os = "linux")]
@@ -36,7 +36,7 @@ pub(crate) use macos::{
     key_input_captured, launched, monitored_events, open, quit_requested, release_key_input,
     screens_changed,
 };
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "android"))]
 pub use windows::FrameSink;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "android"))]
 pub(crate) use windows::{Surface, close, cursor_changed, guest_mode_changed, host_screens, open};

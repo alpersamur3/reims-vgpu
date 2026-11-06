@@ -594,7 +594,7 @@ mod tests {
         }
         let anonymous = vm.allocate_anywhere(page).unwrap();
         let refused = vm.remap_shared_overwrite(view, anonymous, page);
-        assert_eq!(refused.is_err(), cfg!(target_os = "linux"));
+        assert_eq!(refused.is_err(), cfg!(any(target_os = "linux", target_os = "android")));
         for (range, length) in [(view, 2 * page), (at, 2 * page), (anonymous, page)] {
             assert!(vm.deallocate(range, length).is_success());
         }

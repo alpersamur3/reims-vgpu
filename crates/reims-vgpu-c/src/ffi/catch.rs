@@ -3,12 +3,12 @@
 
 // Windows takes Linux's catch: std's `catch_unwind` (a Rust unwind stops at the frame; a foreign
 // exception through an `extern "C-unwind"` host function ends the process there).
-#[cfg(any(target_os = "linux", windows))]
+#[cfg(any(target_os = "linux", target_os = "android", windows))]
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
 
-#[cfg(any(target_os = "linux", windows))]
+#[cfg(any(target_os = "linux", target_os = "android", windows))]
 pub(super) use linux::catch;
 #[cfg(target_os = "macos")]
 pub(super) use macos::catch;

@@ -2078,7 +2078,7 @@ pub(crate) mod tests {
     /// completes, and the memory is unmapped once the import was freed. The command buffer reads
     /// another texture through its ID, so no command of it names the surface's. Linux's: on macOS
     /// IOSurface's memory is the surface's own
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     #[test]
     fn a_released_surface_texture_keeps_the_surfaces_memory_while_imported() {
         use std::sync::atomic::{AtomicU32, Ordering};

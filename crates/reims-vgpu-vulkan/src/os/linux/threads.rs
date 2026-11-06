@@ -117,17 +117,13 @@ mod tests {
 
     const WAIT: Duration = Duration::from_secs(10);
 
-    /// The running thread's name, as Linux keeps it.
+    /// The running thread's name, as Linux keeps it (`/proc/thread-self/comm`: Bionic's libc
+    /// crate binding has no `pthread_getname_np`).
     fn current_name() -> String {
-        let mut buf = [0 as libc::c_char; 64];
-        // SAFETY: a live buffer of the length given.
-        let rc =
-            unsafe { libc::pthread_getname_np(libc::pthread_self(), buf.as_mut_ptr(), buf.len()) };
-        assert_eq!(rc, 0);
-        // SAFETY: pthread_getname_np NUL-terminates within the buffer.
-        unsafe { std::ffi::CStr::from_ptr(buf.as_ptr()) }
-            .to_string_lossy()
-            .into_owned()
+        std::fs::read_to_string("/proc/thread-self/comm")
+            .unwrap()
+            .trim_end_matches('\n')
+            .to_owned()
     }
 
     /// A spawned thread is named, cut to the 15 bytes Linux keeps, and has at least the stack

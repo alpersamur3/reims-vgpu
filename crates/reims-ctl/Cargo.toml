@@ -29,7 +29,7 @@ serde_json = "1.0.153"
 shlex = "2.0.1"
 toml = "1.1.2"
 
-[target.'cfg(target_os = "linux")'.dependencies]
+[target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
 # Lists the host's Vulkan GPUs; `loaded` opens the Vulkan loader at run time, so the binary
 # needs no Vulkan to start.
 ash = { version = "0.38", default-features = false, features = ["std", "loaded"] }

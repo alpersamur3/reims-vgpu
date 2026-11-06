@@ -2378,7 +2378,7 @@ pub(crate) mod tests {
     /// A no-copy buffer over `pages` pages of zeros mapped read-only, which the runtime imports
     /// through a writable twin of them on Linux, and the pages' first byte, which the caller
     /// frees once the buffer is gone.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     pub(crate) fn over_read_only_pages(pages: u64) -> (VulkanBuffer, HostPtr) {
         use reims_vgpu_core::platform::os::vm::{HostVm as _, VmProt};
 
@@ -2404,7 +2404,7 @@ pub(crate) mod tests {
     /// runtime imports a writable twin of the pages, which the fill would reach, where Metal
     /// drops the write (`os/linux/import.rs`, [`crate::gpu::writes::kept_write`]). The rest of
     /// the command buffer runs, and the pages stay zeros
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     #[test]
     fn a_fill_into_read_only_pages_dies_on_linux() {
         use reims_vgpu_core::platform::blit::{BlitCmd, BlitEncoder as _};

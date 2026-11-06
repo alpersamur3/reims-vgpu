@@ -401,7 +401,7 @@ fn size(bytes: u64) -> String {
 /// it, so with reims-ctl: a download stops where it is when the interface quits, and the next
 /// one continues it.
 fn end_with_parent(cmd: &mut Command) {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     {
         use std::os::unix::process::CommandExt;
         let parent = std::process::id() as libc::pid_t;
@@ -419,7 +419,7 @@ fn end_with_parent(cmd: &mut Command) {
             });
         }
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
     let _ = cmd;
 }
 

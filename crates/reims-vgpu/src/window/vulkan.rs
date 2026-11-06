@@ -3,7 +3,7 @@
 //! it its own way (`linux.rs`, `macos.rs`).
 
 // Windows's window keeps Linux's sink shape (reims-vgpu-window's native/windows.rs).
-#[cfg(any(target_os = "linux", windows))]
+#[cfg(any(target_os = "linux", target_os = "android", windows))]
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
