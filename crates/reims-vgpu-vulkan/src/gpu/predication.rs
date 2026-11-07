@@ -1994,22 +1994,26 @@ pub fn work(enc: &VulkanComputeEncoder, sel: &'static str, work: Work<'_>) -> Ra
     if u.foreign && u.bindings.pipeline.is_none() {
         u.refresh(enc, sel);
     }
+    // Ours: a refusal of a pixel format (a kernel variant the runtime cannot build for the
+    // textures bound) drops the work and goes on, outside strict mode
+    // (`crate::answer::dropped_for_format`); any other refusal dies as before.
+    let kept = crate::answer::unless_dropped_for_format;
     if matches!(&work, Work::Execute { range, .. } if range.is_empty())
         || work.direct_only(u.bindings.pipeline.as_ref())
     {
         drop(u);
-        return send(sel, Policy::Dies, || enc.with(sel, |e| work.direct(e)));
+        return send(sel, Policy::Dies, || kept(sel, enc.with(sel, |e| work.direct(e))));
     }
     u.work = true;
     if !u.predicated() {
         drop(u);
-        return send(sel, Policy::Dies, || enc.with(sel, |e| work.direct(e)));
+        return send(sel, Policy::Dies, || kept(sel, enc.with(sel, |e| work.direct(e))));
     }
     let (step, guest) = work.arguments(sel);
     let (chunk, at) = u.step(predication, enc, sel, step, guest);
     drop(u);
     send(sel, Policy::Dies, || {
-        enc.with(sel, |e| work.indirect(e, &chunk, at + OUT))
+        kept(sel, enc.with(sel, |e| work.indirect(e, &chunk, at + OUT)))
     })
 }
 

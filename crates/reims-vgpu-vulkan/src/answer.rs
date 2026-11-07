@@ -2061,6 +2061,69 @@ pub fn inexact(sel: &'static str, kind: Inexact, what: &str) {
     }
 }
 
+/// How many draws and dispatches this process dropped for a pixel format the runtime refuses
+/// ([`dropped_for_format`]).
+static DROPPED_FOR_FORMAT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Ours (ASoftware): a draw or a dispatch at `sel` that the runtime refused with `e`, where its
+/// selector would die. A refusal of a pixel format (`Feature::Format`: a shader variant the
+/// runtime cannot build for the textures bound, as `Kbdsde_TimgA2Xhx_Isrc`'s imageblock slice
+/// into an `RGB10A8_2P_XR10` target was) is, by default, the command dropped and the process
+/// going on: the guest loses that command's writes (a region of a frame drawn or computed
+/// otherwise), where a death ended the emulator. Each distinct refusal writes one line on stderr
+/// naming the function and the refusal, and every one is counted ([`dropped_for_format_count`]).
+/// In strict mode, or for any other refusal, `false`: the caller dies as before.
+pub fn dropped_for_format(sel: &'static str, e: &Error) -> bool {
+    use std::sync::atomic::Ordering;
+    if strict() || !crate::gpu::desc::is_format_refusal(e) {
+        return false;
+    }
+    static SEEN: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    let n = DROPPED_FOR_FORMAT.fetch_add(1, Ordering::Relaxed) + 1;
+    let what = refusal(e);
+    let first = match SEEN.lock() {
+        Ok(mut seen) if !seen.iter().any(|s| *s == what) => {
+            // At most 64 distinct lines: past them, the count alone.
+            if seen.len() < 64 {
+                seen.push(what.clone());
+            }
+            true
+        }
+        _ => false,
+    };
+    let line = if first {
+        format!(
+            "reims-vgpu: {sel}: the Vulkan runtime refused it for a pixel format: {what}; the \
+             command is dropped and the guest goes on (dropped for a format: {n} so far): \
+             REIMS_VGPU_STRICT=1 makes it a death\n"
+        )
+    } else if n.is_power_of_two() && n >= 16 {
+        format!("reims-vgpu: commands dropped for a pixel format the runtime refuses: {n}\n")
+    } else {
+        return true;
+    };
+    let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
+    true
+}
+
+/// How many draws and dispatches this process dropped for a refused pixel format
+/// ([`dropped_for_format`]).
+pub fn dropped_for_format_count() -> u64 {
+    DROPPED_FOR_FORMAT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// `sent`, the runtime's answer to the draw or dispatch `sel`, with a refusal of a pixel format
+/// dropped where [`dropped_for_format`] drops it.
+pub fn unless_dropped_for_format(
+    sel: &'static str,
+    sent: Result<(), Error>,
+) -> Result<(), Error> {
+    match sent {
+        Err(e) if dropped_for_format(sel, &e) => Ok(()),
+        sent => sent,
+    }
+}
+
 /// Each kind of [`Inexact`] this process relayed, with how many times.
 pub fn inexact_counts() -> Vec<(Inexact, u64)> {
     use std::sync::atomic::Ordering;
@@ -2109,6 +2172,26 @@ mod tests {
 
     fn invalid() -> Error {
         Error::Invalid(Invalid::new("fill_buffer", Problem::StorageMode))
+    }
+
+    /// Ours: a draw or a dispatch the runtime refuses for a pixel format is dropped and counted
+    /// by default, and dies in strict mode (the caller's death, `false` here); any other refusal
+    /// is never dropped.
+    #[test]
+    fn a_format_refusal_is_dropped_but_in_strict_mode() {
+        use metal2vulkan::error::{Feature, Unsupported};
+        let format = || Error::Unsupported(Unsupported::not_implemented(Feature::Format));
+        let before = dropped_for_format_count();
+        let sel = "dispatchThreads:threadsPerThreadgroup:";
+        assert!(relaxed(|| dropped_for_format(sel, &format())));
+        let draw = "drawPrimitives:vertexStart:vertexCount:";
+        assert!(relaxed(|| unless_dropped_for_format(draw, Err(format()))).is_ok());
+        assert_eq!(dropped_for_format_count(), before + 2);
+        assert!(!relaxed(|| dropped_for_format(sel, &invalid())));
+        let gap = Error::NotImplemented(RuntimeGap::Textures);
+        assert!(relaxed(|| unless_dropped_for_format(draw, Err(gap))).is_err());
+        assert!(!dropped_for_format(sel, &format()));
+        assert_eq!(dropped_for_format_count(), before + 2);
     }
 
     /// The runtime's own messages that are no degradation, its pipeline-creation log, its late

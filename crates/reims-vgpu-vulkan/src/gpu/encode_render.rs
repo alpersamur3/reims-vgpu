@@ -2402,9 +2402,19 @@ impl VulkanRenderEncoder {
     }
 
     /// Runs `call` on the open encoder for `sel`: a refusal dies at the send, naming the
-    /// runtime's error, as Metal raises at none of these commands.
+    /// runtime's error, as Metal raises at none of these commands. Ours: a draw or a tile
+    /// dispatch the runtime refuses for a pixel format (a shader variant it cannot build for the
+    /// attachments and textures bound) is dropped outside strict mode
+    /// ([`crate::answer::dropped_for_format`]).
     fn run(&self, sel: &'static str, call: Call<'_>) -> RaiseResult<()> {
-        send(sel, Policy::Dies, || self.encoder.with(sel, |e| call(e)))
+        let drops = sel.starts_with("draw") || sel.starts_with("dispatchThreadsPerTile");
+        send(sel, Policy::Dies, || {
+            let sent = self.encoder.with(sel, |e| call(e));
+            match drops {
+                true => crate::answer::unless_dropped_for_format(sel, sent),
+                false => sent,
+            }
+        })
     }
 
     /// Dies at `sel`, a draw or an execution of indirect commands that is not empty, in a pass
