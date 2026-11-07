@@ -672,6 +672,26 @@ mod tests {
     #[test]
     #[cfg(target_os = "android")]
     fn a_buffer_over_scattered_guest_pages_is_gathered() {
+        // Descending pieces, a chunk apart and more (the guest's page lists are LIFO).
+        fill_lands_in_scattered_guest_pages(16, |i| {
+            (i + 1) * (3 * 0x4000 + (i % 3) * (17 << 20) / 16)
+        });
+    }
+
+    /// The same over more pieces than one sparse bind names (`metal2vulkan-runtime`'s
+    /// `RANGES_PER_BIND`, 64): 200 pieces of 16 KiB, none next to another, which the runtime binds
+    /// in several bind infos; the fill lands in each.
+    #[test]
+    #[cfg(target_os = "android")]
+    fn a_buffer_over_more_pieces_than_one_bind_names_is_gathered() {
+        fill_lands_in_scattered_guest_pages(200, |i| (i + 1) * 2 * 0x4000);
+    }
+
+    /// A GPU fill of a buffer over `pieces` pieces of 16 KiB of the guest's RAM, piece `i`
+    /// `from_end(i)` bytes before the RAM's end, but its first and last piece, lands in the guest's
+    /// pieces and reads back through the buffer's view (the tests above).
+    #[cfg(target_os = "android")]
+    fn fill_lands_in_scattered_guest_pages(pieces: u64, from_end: fn(u64) -> u64) {
         use reims_vgpu_core::host::HostPtr;
         use reims_vgpu_core::platform::blit::{BlitCmd, BlitEncoder as _};
         use reims_vgpu_core::platform::command::{CommandBuffer as _, CommandQueue as _};
@@ -685,7 +705,6 @@ mod tests {
         TEST_ON.with(|on| on.set(true));
         const GUEST: u64 = 64 << 20;
         const PIECE: u64 = 0x4000;
-        const PIECES: u64 = 16;
         let fd = vm::memfd(GUEST);
         let backing = files::Backing {
             fd: std::sync::Arc::clone(&fd),
@@ -698,23 +717,22 @@ mod tests {
             fd,
             offset: 0,
         }]);
-        // Descending pieces, a chunk apart and more (the guest's page lists are LIFO).
-        let piece = |i: u64| guest + GUEST - (i + 1) * (3 * PIECE + (i % 3) * (17 << 20) / 16);
+        let piece = |i: u64| guest + GUEST - from_end(i);
         let p = crate::platform::tests::platform();
         let d = crate::gpu::device::tests::dev();
-        let ranges: Vec<ResourceAddressRange> = (0..PIECES)
+        let ranges: Vec<ResourceAddressRange> = (0..pieces)
             .map(|i| ResourceAddressRange {
                 address: piece(i),
                 length: PIECE,
             })
             .collect();
         let ranges = p.new_address_range_array(&ranges).unwrap();
-        let own = vm::allocate_aliasable(PIECES * PIECE).unwrap();
+        let own = vm::allocate_aliasable(pieces * PIECE).unwrap();
         // SAFETY: the pages stay mapped until the process ends.
-        let contents = unsafe { HostRange::new(own, PIECES * PIECE) };
+        let contents = unsafe { HostRange::new(own, pieces * PIECE) };
         let buffer = d
             .new_buffer(BufferDesc {
-                length: PIECES * PIECE,
+                length: pieces * PIECE,
                 options: vec![OptionSet::StorageMode(0)],
                 pinned_gpu_address: None,
                 contents: Some(contents),
@@ -727,14 +745,14 @@ mod tests {
         let before = rt::gather_counts();
         assert!(buffer.replace_backing(&ranges, false).unwrap());
         let at = buffer.contents().addr().to_u64();
-        assert!(holds(at, PIECES * PIECE), "a deferred view");
-        assert_eq!(files::mappings_between(at, at + PIECES * PIECE), 0);
+        assert!(holds(at, pieces * PIECE), "a deferred view");
+        assert_eq!(files::mappings_between(at, at + pieces * PIECE), 0);
         let q = d.new_command_queue().unwrap();
         let cb = q.command_buffer(OnFault::Return).unwrap().unwrap();
         let e = cb.blit_encoder(OnFault::Return).unwrap().unwrap();
         let fill = BlitCmd::FillBuffer {
             buffer: &buffer,
-            range: NsRange::new(PIECE, PIECES * PIECE - 2 * PIECE),
+            range: NsRange::new(PIECE, pieces * PIECE - 2 * PIECE),
             value: 0x5c,
         };
         e.encode(OnFault::Return, fill).unwrap();
@@ -758,10 +776,12 @@ mod tests {
         }
         eprintln!(
             "the fill's pages in the guest: {landed:?}; wanted {:?}",
-            (1..PIECES - 1).map(|i| (piece(i) - guest) / PIECE).collect::<Vec<_>>()
+            (1..pieces - 1)
+                .map(|i| (piece(i) - guest) / PIECE)
+                .collect::<Vec<_>>()
         );
-        for i in 0..PIECES {
-            let want = if i == 0 || i == PIECES - 1 { 0 } else { 0x5c };
+        for i in 0..pieces {
+            let want = if i == 0 || i == pieces - 1 { 0 } else { 0x5c };
             let first = read(piece(i));
             let last = read(piece(i) + PIECE - 1);
             assert_eq!((first, last), (want, want), "the guest's piece {i}");
