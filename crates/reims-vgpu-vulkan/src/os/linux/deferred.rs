@@ -592,7 +592,8 @@ fn report() {
         target: "reims_vgpu_vulkan::os",
         "deferred views: {views} live ({} made, {} pinned), {windows} windows of {pages} pages \
          mapped by {} CPU faults; the library's mappings {}; gathered: {} buffers live of {} MiB \
-         ({} made, {} binds in {} ms), {} chunks of {} MiB live ({} imported), {} pointer answers,          {} heap textures shadowed",
+         ({} made, {} binds in {} ms), {} chunks of {} MiB live ({} imported in {} ms), {} pointer \
+         answers, {} heap textures shadowed",
         VIEWS_MADE.load(Ordering::Relaxed),
         PINNED.load(Ordering::Relaxed),
         FAULTS.load(Ordering::Relaxed),
@@ -605,6 +606,7 @@ fn report() {
         c.chunks_live,
         c.chunk_bytes_live >> 20,
         c.chunks_imported,
+        c.import_micros / 1000,
         c.pointer_answers,
         c.heap_shadows,
     );
