@@ -41,7 +41,9 @@
 //! fewer bytes than the allocation size. An allocation past the host's memory is refused, as
 //! macOS refuses one past `hw.memsize_usable`: here past the physical memory Windows reports
 //! (`GlobalMemoryStatusEx`'s `ullTotalPhys`). The protection options read back with the lower
-//! options each implies: 2 with 1, 4 with 2 and 1.
+//! options each implies: 2 with 1, 4 with 2 and 1. One exception to macOS 26: a bare allocation
+//! (a width, height and bytes per row of 0 and no planes, with an allocation size) is made, as
+//! visionOS 27's guest needs it (`create`).
 //!
 //! A surface made from plane properties alone (`initWithProperties:`) is its planes' memory,
 //! whole pages from its first byte through the end of the plane that ends last; it answers 1
@@ -437,12 +439,28 @@ impl IoSurfaces<VulkanPlatform> for WindowsSurfaces {
             u64::from(spec.element_width),
             u64::from(spec.element_height),
         );
-        let span = extent(
-            (spec.width, spec.height),
-            element,
-            spec.bytes_per_element,
-            spec.bytes_per_row,
-        )?;
+        // A bare allocation: no width, height, rows or planes, only bytes. visionOS 27 maps such
+        // surfaces over its pages in White Sands (1.8 MB, 1 byte per element; its own IOSurface
+        // made them), and asks for one again each time it is refused, thousands of times a
+        // minute. macOS 26's IOSurfaceCreate refuses a width of 0 (module docs); here the
+        // surface is its bytes, with no rows to read.
+        let bare = spec.width == 0
+            && spec.height == 0
+            && spec.bytes_per_row == 0
+            && spec.planes.is_none();
+        let span = if bare {
+            if spec.alloc_size == 0 {
+                return None;
+            }
+            0
+        } else {
+            extent(
+                (spec.width, spec.height),
+                element,
+                spec.bytes_per_element,
+                spec.bytes_per_row,
+            )?
+        };
         if spec.alloc_size < spec.offset.checked_add(span)? || spec.alloc_size > physical_memory() {
             return None;
         }
