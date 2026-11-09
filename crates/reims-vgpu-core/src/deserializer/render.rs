@@ -189,6 +189,10 @@ pub struct RenderDecoder<P: Platform> {
     command_buffer: Option<P::CommandBuffer>,
     /// The pipeline state the last 0x74 set, until the pass ends or faults.
     pipeline: Option<P::RenderPipeline>,
+    /// Ours: the last 0x74 named a state the platform refused, under
+    /// [`crate::refusals::skip`]: its draws and tile dispatches are skipped until the next 0x74,
+    /// the pass's end or a fault.
+    pipeline_refused: bool,
     /// The highest colour attachment index a pass described with a texture.
     max_color_attachment_index: u32,
 }
@@ -204,6 +208,7 @@ impl<P: Platform> RenderDecoder<P> {
             encoder: None,
             command_buffer,
             pipeline: None,
+            pipeline_refused: false,
             max_color_attachment_index: 0,
         }
     }
@@ -258,6 +263,7 @@ impl<P: Platform> RenderDecoder<P> {
         if header.continued_by_next == 0 {
             self.send(RenderCmd::EndEncoding)?;
             self.pipeline = None;
+            self.pipeline_refused = false;
         }
         Ok(())
     }
@@ -375,12 +381,30 @@ impl<P: Platform> RenderDecoder<P> {
         self.send(RenderCmd::EndEncoding)?;
         self.encoder = None;
         self.pipeline = None;
+        self.pipeline_refused = false;
         Ok(())
     }
 
     /// Sends `cmd` to the encoder; with none, nothing is sent (a message to nil). The caller
-    /// has evaluated every argument, lookups included.
+    /// has evaluated every argument, lookups included. Ours: after a 0x74 that named a refused
+    /// state ([`Self::pipeline_refused`]), a draw, a tile dispatch or an execution of commands is
+    /// not sent.
     fn send(&self, cmd: RenderCmd<'_, P>) -> RaiseResult<()> {
+        if self.pipeline_refused {
+            let sel = cmd.selector();
+            if sel.starts_with("draw")
+                || sel.starts_with("dispatchThreadsPerTile")
+                || sel.starts_with("executeCommands")
+            {
+                // A line at the 1st, 10th, 100th... skip of the process.
+                static SKIPPED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                let n = SKIPPED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                if n.to_string().trim_end_matches('0') == "1" {
+                    log::warn!("{sel}: skipped, its pipeline state was refused (x{n})");
+                }
+                return Ok(());
+            }
+        }
         match &self.encoder {
             Some(encoder) => Ok(encoder.encode(OnFault::Return, cmd)?),
             None => Ok(()),

@@ -439,10 +439,32 @@ impl<P: Platform> RenderDecoder<P> {
                 "render pipeline state reference 0"
             );
         }
-        let pipeline = self
+        let looked_up = self
             .deserializer()
             .object_delegate()
-            .get_render_pipeline_state(hold, command.pipeline_state_reference)?;
+            .get_render_pipeline_state(hold, command.pipeline_state_reference);
+        let pipeline = match looked_up {
+            Ok(pipeline) => pipeline,
+            // Ours: under `REIMS_VGPU_REFUSALS=skip`, a state the platform refused after the guest
+            // took its handle (a tile state made asynchronously, answered nil) costs the draws and
+            // tile dispatches that would use it, not the whole command buffer, which the guest
+            // reads as a GPU hang. The state set before stays set.
+            Err(r)
+                if crate::refusals::skip()
+                    && r.id()
+                        == crate::raise::RaiseId::Manager(
+                            crate::resources::manager::RaiseKind::Lookup(
+                                crate::resources::manager::ObjectKind::RenderPipeline,
+                            ),
+                        ) =>
+            {
+                crate::refusals::first_skip("setRenderPipelineState:");
+                self.pipeline_refused = true;
+                return Ok(());
+            }
+            Err(r) => return Err(r),
+        };
+        self.pipeline_refused = false;
         self.send(RenderCmd::SetRenderPipelineState {
             pipeline_state: pipeline.as_ref(),
         })?;

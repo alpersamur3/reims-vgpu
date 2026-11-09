@@ -49,7 +49,8 @@ pub(super) fn check_primitive_type(primitive_type: u64) -> RaiseResult<()> {
 impl<P: Platform> RenderDecoder<P> {
     /// A draw needs a pipeline state.
     fn check_draw_pipeline(&self) -> RaiseResult<()> {
-        if self.pipeline.is_none() {
+        // Ours: or a state the platform refused, whose commands are skipped (`send`).
+        if self.pipeline.is_none() && !self.pipeline_refused {
             crate::raise!(
                 RaiseKind::DrawWithoutPipeline,
                 "draw without a pipeline state"
@@ -60,7 +61,8 @@ impl<P: Platform> RenderDecoder<P> {
 
     /// A tile dispatch needs a pipeline state.
     fn check_dispatch_pipeline(&self) -> RaiseResult<()> {
-        if self.pipeline.is_none() {
+        // Ours: or a state the platform refused, whose commands are skipped (`send`).
+        if self.pipeline.is_none() && !self.pipeline_refused {
             crate::raise!(
                 RaiseKind::DispatchWithoutPipeline,
                 "tile dispatch without a pipeline state"

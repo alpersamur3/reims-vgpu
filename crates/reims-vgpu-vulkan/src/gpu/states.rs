@@ -401,6 +401,8 @@ pub(crate) fn new_depth_stencil_state(
 ///   once Metal links the pipeline (`IndirectCommandsDirectArgument`), and a render state with
 ///   rasterization off whose vertex function returns a value (`UnrasterizedVertexReturn`), among
 ///   them; a problem the runtime adds there is the `NSError` too.
+/// - Ours, only under `REIMS_VGPU_REFUSALS=skip` (`answer::skips_refusals`): code 3 for every
+///   other `Unsupported` and `NotImplemented` refusal, which otherwise dies.
 ///
 /// An answer the runtime cannot prove ([`rt::Error::Unproven`]) dies, naming it (`unproven`), as
 /// does every other refusal.
@@ -418,6 +420,16 @@ pub(crate) fn pipeline_error(e: &rt::Error) -> Option<NsErrorText> {
             RuntimeInput::DynamicSymbol { .. } | RuntimeInput::DynamicLibrary { .. },
         )) => UNDEFINED_SYMBOLS,
         rt::Error::MetalError(m) => m.code,
+        // Ours: under `REIMS_VGPU_REFUSALS=skip` (`answer::skips_refusals`), a function or a state
+        // the runtime does not implement or support is the guest's error to handle, as a
+        // function Metal's compiler refuses is, where a death ended the emulator.
+        rt::Error::Unsupported(_) | rt::Error::NotImplemented(_)
+            if crate::answer::skips_refusals() =>
+        {
+            reims_vgpu_core::refusals::first_skip("a pipeline creator");
+            log::warn!("a pipeline state refused, answered nil: {e}");
+            METAL_REFUSES
+        }
         _ => return None,
     };
     Some(NsErrorText {

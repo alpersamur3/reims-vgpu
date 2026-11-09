@@ -1701,6 +1701,19 @@ pub fn decide_describing<T>(
     descriptor: Option<&str>,
 ) -> RaiseResult<T> {
     let line = refusal_describing(&e, descriptor);
+    // Ours: under `REIMS_VGPU_REFUSALS=skip` ([`skips_refusals`]), a command with no result that
+    // would die here, but for a lost device or no memory, costs the guest that command.
+    if policy == Policy::Dies
+        && std::mem::size_of::<T>() == 0
+        && std::any::type_name::<T>() == "()"
+        && !matches!(e, Error::DeviceLost | Error::OutOfMemory(_))
+        && skips_refusals()
+    {
+        skipped(sel, &line);
+        // SAFETY: `T` is `()` (checked above), which has no bytes and every value of which is
+        // the one value.
+        return Ok(unsafe { std::mem::zeroed() });
+    }
     match e {
         Error::Invalid(_) if policy != Policy::Dies => {
             policy.on().throw(Raise::platform(sel).with_detail(line))
@@ -2121,6 +2134,32 @@ pub fn unless_dropped_for_format(
     match sent {
         Err(e) if dropped_for_format(sel, &e) => Ok(()),
         sent => sent,
+    }
+}
+
+/// Ours (ASoftware): whether this process skips what the runtime refuses where Metal goes on
+/// (`REIMS_VGPU_REFUSALS=skip`, [`reims_vgpu_core::refusals`]), but in strict mode. Unset, every
+/// refusal is decided as before. Where it is on: a command with no result that would die at its
+/// send, but for a lost device or no memory, is skipped ([`decide_describing`]), and a pipeline
+/// creator answers nil and an `NSError` for a function or a state the runtime does not implement
+/// or support (`crate::gpu::states::pipeline_error`).
+pub fn skips_refusals() -> bool {
+    reims_vgpu_core::refusals::skip() && !strict()
+}
+
+/// The skip of the refused command `sel` ([`skips_refusals`]), its refusal's line `line`: logged
+/// at warn at the 1st, 10th, 100th... skip of each selector and line.
+fn skipped(sel: &'static str, line: &str) {
+    reims_vgpu_core::refusals::first_skip(sel);
+    static SKIPPED: std::sync::Mutex<Option<std::collections::HashMap<String, u64>>> =
+        std::sync::Mutex::new(None);
+    if let Ok(mut seen) = SKIPPED.lock() {
+        let key = format!("{sel}|{line}");
+        let n = seen.get_or_insert_with(Default::default).entry(key).or_insert(0);
+        *n += 1;
+        if n.to_string().trim_end_matches('0') == "1" {
+            log::warn!("{sel}: skipped x{n}: {line}");
+        }
     }
 }
 
