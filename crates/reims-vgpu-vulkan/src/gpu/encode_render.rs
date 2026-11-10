@@ -217,7 +217,8 @@ use reims_vgpu_core::raise::{OnFault, RaiseResult};
 use reims_vgpu_core::sync::Mutex;
 
 use crate::answer::{
-    Policy, decide, get, metal_aborts, plain, plain_at, refused, send, unrepresentable,
+    Policy, decide, decide_describing, get, metal_aborts, plain, plain_at, refused, send,
+    unrepresentable,
 };
 use crate::gpu::command::executions::{Execution, Points};
 use crate::gpu::command::{HANG, VulkanCommandBuffer};
@@ -1859,6 +1860,37 @@ impl Reach {
     }
 }
 
+/// The pass `d`'s attachments for the line of a refusal of its format ([`make`]), which names
+/// no texture: each one's pixel format (the number and Metal's name), texture type, sample
+/// count, usage and storage mode, by index, then the depth and stencil attachments'.
+fn pass_formats(d: &rt::RenderPassDescriptor) -> String {
+    let texture = |t: &rt::Texture| {
+        let pf = t.pixel_format();
+        format!(
+            "{} ({}) {:?} x{} usage {:#x} {:?}",
+            pf.as_raw(),
+            pf.name(),
+            t.texture_type(),
+            t.sample_count(),
+            t.usage().as_raw(),
+            t.storage_mode()
+        )
+    };
+    let mut items: Vec<String> = (d.color_attachments.iter().enumerate())
+        .filter_map(|(i, c)| c.texture.as_ref().map(|t| format!("colour {i} {}", texture(t))))
+        .collect();
+    if let Some(t) = &d.depth_attachment.texture {
+        items.push(format!("depth {}", texture(t)));
+    }
+    if let Some(t) = &d.stencil_attachment.texture {
+        items.push(format!("stencil {}", texture(t)));
+    }
+    match items.is_empty() {
+        true => "the pass's attachments: none".to_owned(),
+        false => format!("the pass's attachments: {}", items.join(", ")),
+    }
+}
+
 /// The encoder of the pass `d` on `command_buffer`, with its rate map as [`open`] took it and
 /// without the colour resolves it `dropped` ([`untouched_resolves`]); `rasterizes` is false for a
 /// pass of a mutable rate map not yet reset, and `varying_rates` true for one of a map whose
@@ -1944,6 +1976,7 @@ fn make(
                 e => {
                     if crate::gpu::desc::is_format_refusal(&e) {
                         crate::gpu::ycbcr::pass_refused(sel, &d, &e);
+                        return decide_describing(sel, Policy::Dies, e, Some(&pass_formats(&d)));
                     }
                     decide(sel, Policy::Dies, e)
                 }
