@@ -461,6 +461,14 @@ impl HostVm for LinuxVm {
         if length == 0 {
             return Ok(HostAddr::NULL);
         }
+        // A mapping of a maker only the CPU uses is a deferred view (`idle::lazy_core`): its
+        // pages are recorded in the table by the remaps that follow and mapped by the CPU's
+        // touch.
+        if super::idle::lazy_core(reims_vgpu_core::memory::mapping::maker::current())
+            && let Ok(at) = deferred::allocate(length)
+        {
+            return Ok(at);
+        }
         let at = anonymous(None, length, "allocate_anywhere")?;
         files::forget(at, length);
         Ok(HostAddr::from_addr(at.to_usize()))

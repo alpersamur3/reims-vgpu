@@ -13,6 +13,12 @@
 //! - **The switch.** `REIMS_VGPU_IDLE_VIEWS`: unset, on where the old path runs on Android;
 //!   `1`, on wherever deferred views are off; `0`, off, which is the old path as it was. Where
 //!   deferred views are on there is nothing to give back that they have not deferred already.
+//! - **Core's own mappings** of the guest's pages (object lists, the task memory behind a host
+//!   address, the pages a no-copy buffer is made over) take a kernel mapping for each run of
+//!   scattered pages, as an alias does, and grow with what the guest keeps open: 46,000 of them
+//!   at one point on the phone, 6,000 when the screen closed. Those only the CPU uses are
+//!   deferred views ([`lazy_core`]); the pages the GPU runtime imports by pointer are not, unless
+//!   named.
 //! - **The census** (`crate::gpu::idle`) runs wherever deferred views are off, switch or no
 //!   switch: it is how to tell, on a device, which class of views holds the mappings as their
 //!   count grows.
@@ -103,6 +109,46 @@ pub(crate) fn enabled() -> bool {
         _ => cfg!(target_os = "android"),
     });
     on && !deferred::enabled()
+}
+
+/// Whether the mappings core makes for `maker` (its scope, `reims_vgpu_core::memory::mapping::
+/// maker`) are deferred views: a reservation with no access whose runs the table records
+/// unmapped, and whose 128 KiB windows the CPU's touch maps from the table (the fault handler of
+/// [`super::deferred`], windows bounded by its page limit), instead of a kernel mapping for each
+/// run of scattered pages.
+///
+/// Only where idle views are on ([`enabled`]: the old path, deferred views off) and only for
+/// makers whose pointer the CPU alone uses. `REIMS_VGPU_LAZY_MAPPINGS` names them, comma
+/// separated: `lists` (object lists, the default), `addresses` (the task memory a command reads
+/// or writes through a host address for the length of the command), `buffers` (the pages a
+/// no-copy buffer is made over, which the GPU runtime imports: off unless named, because on a
+/// driver that cannot gather the import maps the whole view for good, as an eager mapping
+/// would be, [`super::deferred::gather_source`]); `none` or `0` for none.
+pub(crate) fn lazy_core(maker: u8) -> bool {
+    use reims_vgpu_core::memory::mapping::maker as m;
+    static NAMED: std::sync::OnceLock<(bool, bool, bool)> = std::sync::OnceLock::new();
+    #[cfg(test)]
+    if TEST_ON.with(std::cell::Cell::get) {
+        return maker == m::OBJECT_LIST;
+    }
+    if !enabled() {
+        return false;
+    }
+    let (lists, addresses, buffers) = *NAMED.get_or_init(|| {
+        match std::env::var("REIMS_VGPU_LAZY_MAPPINGS") {
+            Err(_) => (true, false, false),
+            Ok(named) => {
+                let has = |what: &str| named.split(',').any(|n| n.trim() == what);
+                (has("lists"), has("addresses"), has("buffers"))
+            }
+        }
+    });
+    match maker {
+        m::OBJECT_LIST => lists,
+        m::TASK_ADDRESS => addresses,
+        m::BUFFER_OVER_PAGES => buffers,
+        _ => false,
+    }
 }
 
 /// Whether the views census runs: where deferred views are off, which have a census of their own.
