@@ -67,13 +67,22 @@ pub(super) fn set_test_limit(limit: Option<u64>) {
     TEST_LIMIT.with(|l| l.set(limit));
 }
 
-/// `vm.max_map_count` read now; `u64::MAX` where it does not read, leaving the kernel's own
-/// refusal.
+/// The limit taken where `vm.max_map_count` does not read. On Android an app cannot read it (the
+/// phone's file is closed to it, measured on a Galaxy S25), and the kernel's limit there is the
+/// default 65,530, so that is taken and the budget, the census and the safety net work. Elsewhere
+/// no limit is assumed, leaving the kernel's own refusal.
+const UNREAD_LIMIT: u64 = if cfg!(target_os = "android") {
+    65_530
+} else {
+    u64::MAX
+};
+
+/// `vm.max_map_count` read now; [`UNREAD_LIMIT`] where it does not read.
 fn read_limit() -> u64 {
     std::fs::read_to_string("/proc/sys/vm/max_map_count")
         .ok()
         .and_then(|l| l.trim().parse().ok())
-        .unwrap_or(u64::MAX)
+        .unwrap_or(UNREAD_LIMIT)
 }
 
 /// The limit as last read, reading it the first time; a test's, where the thread set one.
@@ -366,5 +375,17 @@ mod tests {
         assert_eq!(budget(1_048_576), 1_048_576 - 16_384);
         assert_eq!(budget(100), 0);
         assert_eq!(budget(u64::MAX), u64::MAX - 16_384);
+    }
+
+    /// Where the setting does not read, Android takes the default 65,530 and its budget is the
+    /// default less the reserve; other targets assume none
+    #[test]
+    fn an_unread_limit_is_androids_default_there() {
+        if cfg!(target_os = "android") {
+            assert_eq!(UNREAD_LIMIT, 65_530);
+            assert_eq!(budget(UNREAD_LIMIT), 49_146);
+        } else {
+            assert_eq!(UNREAD_LIMIT, u64::MAX);
+        }
     }
 }
