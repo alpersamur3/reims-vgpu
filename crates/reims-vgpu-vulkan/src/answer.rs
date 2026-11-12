@@ -15,14 +15,25 @@
 //! - [`create`]: a creator, where Metal answers nil: every refusal the runtime types
 //!   [`Error::Nil`], what plain Metal answers nil for, and those of [`Nil`]'s set, which the
 //!   runtime types otherwise where plain Metal was measured to answer nil, are `None`; the rest
-//!   are as [`send`] decides them.
+//!   are as [`send`] decides them. A texture creator's is [`create_texture`], which answers a
+//!   refusal of what the runtime does not build yet as [`nil_for_gap`] decides it.
 //! - [`error_text`]: a runtime error where Metal hands back an `NSError`.
 //!
 //! **What the runtime refuses where Metal would go on** (`NotImplemented`, `Unsupported`,
 //! `AppleOnly`, a Vulkan failure, a lost device, a wait it will not make) is never a raise the
 //! guest could catch: it is a death at the send, naming the selector and the runtime's error
 //! ([`refused`]). **A method not built yet** dies the same way ([`unbuilt`]), and so does a raw
-//! value the runtime's types cannot hold ([`unrepresentable`]).
+//! value the runtime's types cannot hold ([`unrepresentable`]). Two such refusals are ours
+//! (ASoftware) to go on past, outside strict mode: a draw's, a tile dispatch's or a compute work
+//! item's refusal of a pixel format drops the command ([`dropped_for_format`]), and a texture
+//! creator's refusal of what the runtime does not build yet (`NotImplemented`: a swizzle written
+//! through under `writeSwizzleEnabled` among them) answers nil, one warning naming the descriptor
+//! the runtime was given ([`create_texture`], [`nil_for_gap`]): `newTextureWithDescriptor:`,
+//! `newSharedTextureWithDescriptor:`, `newTextureWithDescriptor:iosurface:plane:`, a buffer's
+//! `newTextureWithDescriptor:offset:bytesPerRow:` and
+//! `newLinearTextureWithDescriptor:offset:bytesPerRow:bytesPerImage:`, and a heap's
+//! `newTextureWithDescriptor:offset:`. In strict mode both die as every other refusal does, the
+//! texture creator's line naming the descriptor too.
 //!
 //! **A value of Metal's this platform does not follow**, which no runtime notice announces, dies
 //! where the guest would read it, named by its kind ([`Unfollowed`], [`unfollowed`]); what made
@@ -278,7 +289,44 @@ pub fn create<T>(
     call: impl FnOnce() -> Result<T, Error>,
 ) -> RaiseResult<Option<T>> {
     stop_if_task_ended();
+    created(sel, policy, nil, inside(Some(sel), call))
+}
+
+/// [`create`] for a texture creator, `describe` saying the descriptor the runtime was given
+/// ([`crate::gpu::desc::RuntimeDescriptor`]), asked only where the runtime refuses what it does
+/// not build yet (`NotImplemented`): nil where [`nil_for_gap`] answers it so, and otherwise the
+/// death [`decide_describing`] makes, its line carrying the descriptor too. Every other answer is
+/// [`create`]'s. The device's, the shared, the IOSurface, a buffer's two and a heap's creators
+/// take it.
+pub fn create_texture<T>(
+    sel: &'static str,
+    policy: Policy,
+    nil: Nil,
+    describe: impl FnOnce() -> String,
+    call: impl FnOnce() -> Result<T, Error>,
+) -> RaiseResult<Option<T>> {
+    stop_if_task_ended();
     match inside(Some(sel), call) {
+        Err(e @ Error::NotImplemented(_)) => {
+            let descriptor = describe();
+            if nil_for_gap(sel, &e, &descriptor) {
+                return Ok(None);
+            }
+            let descriptor = format!("the descriptor: {descriptor}");
+            decide_describing(sel, policy, e, Some(&descriptor))
+        }
+        made => created(sel, policy, nil, made),
+    }
+}
+
+/// [`create`]'s answer to `made`, what the creator's call for `sel` gave.
+fn created<T>(
+    sel: &'static str,
+    policy: Policy,
+    nil: Nil,
+    made: Result<T, Error>,
+) -> RaiseResult<Option<T>> {
+    match made {
         Ok(v) => Ok(Some(v)),
         Err(Error::Nil(_)) => Ok(None),
         Err(e) if nil.covers(&e) => {
@@ -2124,6 +2172,67 @@ pub fn unless_dropped_for_format(
     }
 }
 
+/// How many textures this process answered nil for where the runtime does not build them yet
+/// ([`nil_for_gap`]).
+static NIL_FOR_GAP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Ours (ASoftware): whether the texture creator `sel`, whose call the runtime refused with `e`,
+/// answers nil where its selector would die. A refusal of what the runtime does not build yet
+/// (`NotImplemented`: a texture written or rendered through a swizzle under
+/// `writeSwizzleEnabled`, `RuntimeGap::WriteSwizzle`, which Apple's OpenGL ES asked for in an iOS
+/// 26 game on the Android app; a texture buffer of more than one level; a heap's texture whose
+/// image its memory does not take) is, by default, nil, as Metal answers a texture it makes none
+/// of, and core takes it as it takes Metal's nil: a texture of the device's, the shared, the
+/// IOSurface or a heap's creator refuses its resource ("Metal made no texture"), so the guest's
+/// execs that name it fault, and a buffer's reaches its resource nil, where a death ended the
+/// emulator. Metal makes each such texture; what a guest does past the nil is not measured (no
+/// run has reached it yet). Each distinct refusal writes one warning naming the selector, the
+/// refusal and `descriptor`, the descriptor as the runtime was given it ([`gap_line`]), and every
+/// one is counted ([`nil_for_gap_count`]); past 16 a warning at each power of two gives the
+/// count. In strict mode, or for any other refusal, `false`: the caller dies as before.
+pub fn nil_for_gap(sel: &'static str, e: &Error, descriptor: &str) -> bool {
+    use std::sync::atomic::Ordering;
+    if strict() || !matches!(e, Error::NotImplemented(_)) {
+        return false;
+    }
+    static SEEN: reims_vgpu_core::sync::Mutex<Vec<String>> =
+        reims_vgpu_core::sync::Mutex::new(Vec::new());
+    let n = NIL_FOR_GAP.fetch_add(1, Ordering::Relaxed) + 1;
+    let what = format!("{sel} {} {descriptor}", refusal(e));
+    let first = {
+        let mut seen = SEEN.lock();
+        // At most 64 distinct lines: past them, the count alone.
+        let first = seen.len() < 64 && !seen.contains(&what);
+        if first {
+            seen.push(what);
+        }
+        first
+    };
+    if first {
+        log::warn!("{}", gap_line(sel, e, descriptor, n));
+    } else if n.is_power_of_two() && n >= 16 {
+        log::warn!("textures answered nil where the Vulkan runtime does not build them yet: {n}");
+    }
+    true
+}
+
+/// [`nil_for_gap`]'s warning of the `n`th texture answered nil: `sel`, the runtime's refusal `e`
+/// ([`refusal`]), and `descriptor` last.
+fn gap_line(sel: &'static str, e: &Error, descriptor: &str, n: u64) -> String {
+    format!(
+        "{sel}: {}; answered nil, where Metal makes the texture, and the guest goes on (nil for a \
+         runtime gap: {n} so far; REIMS_VGPU_STRICT=1 makes it a death); the descriptor: \
+         {descriptor}",
+        refusal(e)
+    )
+}
+
+/// How many textures this process answered nil for where the runtime does not build them yet
+/// ([`nil_for_gap`]).
+pub fn nil_for_gap_count() -> u64 {
+    NIL_FOR_GAP.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Each kind of [`Inexact`] this process relayed, with how many times.
 pub fn inexact_counts() -> Vec<(Inexact, u64)> {
     use std::sync::atomic::Ordering;
@@ -2192,6 +2301,59 @@ mod tests {
         assert!(relaxed(|| unless_dropped_for_format(draw, Err(gap))).is_err());
         assert!(!dropped_for_format(sel, &format()));
         assert_eq!(dropped_for_format_count(), before + 2);
+    }
+
+    /// Ours: a texture creator's refusal of what the runtime does not build yet is nil and
+    /// counted by default, its warning naming the selector, the refusal and the descriptor last,
+    /// and dies in strict mode, its line naming the descriptor too; every other refusal is
+    /// [`create`]'s
+    #[test]
+    fn a_texture_the_runtime_does_not_build_yet_is_nil_but_in_strict_mode() {
+        let sel = "newTextureWithDescriptor:";
+        let gap = || Err::<(), _>(Error::NotImplemented(RuntimeGap::WriteSwizzle));
+        let described = || "type 2 MTLTextureType2D, a test's".to_owned();
+        let before = nil_for_gap_count();
+        let made = relaxed(|| create_texture(sel, Policy::Dies, Nil::Never, described, gap));
+        assert_eq!(made, Ok(None));
+        assert_eq!(nil_for_gap_count(), before + 1);
+        let nil_of = || {
+            Err::<(), _>(Error::Nil(metal2vulkan_runtime::Nil::new(
+                "new_texture",
+                Problem::StorageMode,
+            )))
+        };
+        let made = relaxed(|| create_texture(sel, Policy::Dies, Nil::Never, described, nil_of));
+        assert_eq!(made, Ok(None));
+        let lost = || Err::<(), _>(Error::DeviceLost);
+        let site = catch_death(|| {
+            relaxed(|| create_texture(sel, Policy::Dies, Nil::Never, described, lost))
+        })
+        .unwrap_err();
+        assert_eq!((site.kind, site.file), (DeathKind::Abort, sel));
+        assert_eq!(nil_for_gap_count(), before + 1);
+        *LAST_LINE.lock() = None;
+        let site = catch_death(|| create_texture(sel, Policy::Dies, Nil::Never, described, gap))
+            .unwrap_err();
+        let line = LAST_LINE.lock().take().unwrap_or_default();
+        assert_eq!((site.kind, site.file), (DeathKind::Abort, sel), "{line}");
+        assert_eq!(
+            line,
+            "the Vulkan runtime refused it: not implemented in the runtime yet: WriteSwizzle; the \
+             descriptor: type 2 MTLTextureType2D, a test's"
+        );
+        assert_eq!(nil_for_gap_count(), before + 1);
+        let e = Error::NotImplemented(RuntimeGap::WriteSwizzle);
+        assert_eq!(
+            gap_line(sel, &e, "type 2 MTLTextureType2D", 3),
+            "newTextureWithDescriptor:: the Vulkan runtime refused it: not implemented in the \
+             runtime yet: WriteSwizzle; answered nil, where Metal makes the texture, and the guest \
+             goes on (nil for a runtime gap: 3 so far; REIMS_VGPU_STRICT=1 makes it a death); the \
+             descriptor: type 2 MTLTextureType2D"
+        );
+        assert!(!nil_for_gap(sel, &e, "in strict mode"));
+        let other = invalid();
+        assert!(!relaxed(|| nil_for_gap(sel, &other, "of another refusal")));
+        assert_eq!(nil_for_gap_count(), before + 1);
     }
 
     /// The runtime's own messages that are no degradation, its pipeline-creation log, its late

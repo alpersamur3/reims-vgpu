@@ -46,16 +46,16 @@ use reims_vgpu_core::rt::{BlockEnv, Hold};
 use reims_vgpu_core::sync::Mutex;
 
 use crate::answer::{
-    Nil, Policy, RUNTIME_DOMAIN, create, decide, get, get_describing, hearing, metal_aborts, plain,
-    plain_at, send, unrepresentable,
+    Nil, Policy, RUNTIME_DOMAIN, create, create_texture, decide, get, get_describing, hearing,
+    metal_aborts, plain, plain_at, send, unrepresentable,
 };
 use crate::gpu::backing::{self, Backing, HEAP_GRANULE};
 use crate::gpu::caps;
 use crate::gpu::command::{QueueObject, VulkanCommandQueue};
 use crate::gpu::desc::{
-    Maker, PipelineDescriptorObject, TextureFields, VulkanComputePipelineDescriptor,
-    VulkanRenderPipelineDescriptor, VulkanTextureDescriptor, VulkanTileRenderPipelineDescriptor,
-    format_refused,
+    Maker, PipelineDescriptorObject, RuntimeDescriptor, TextureFields,
+    VulkanComputePipelineDescriptor, VulkanRenderPipelineDescriptor, VulkanTextureDescriptor,
+    VulkanTileRenderPipelineDescriptor, format_refused,
 };
 use crate::gpu::event::{VulkanEvent, VulkanSharedEvent, VulkanSharedEventHandle};
 use crate::gpu::icb::VulkanIcb;
@@ -1210,7 +1210,8 @@ impl GpuDevice<VulkanPlatform> for VulkanDevice {
         let space = Arc::new(space);
         let token: rt::RangeToken = Box::new(Arc::clone(&space));
         let raw = fields.raw_pixel_format();
-        let made = create(sel, Policy::Dies, Nil::StorageMode, || {
+        let described = || RuntimeDescriptor::of(&fields, &desc).to_string();
+        let made = create_texture(sel, Policy::Dies, Nil::StorageMode, described, || {
             (self.raw.new_shared_texture_with_range_token(&desc, token))
                 .map_err(|e| format_refused(sel, "a texture of", raw, e))
         })?;
@@ -1274,7 +1275,10 @@ impl GpuDevice<VulkanPlatform> for VulkanDevice {
     /// layout in Metal's heaps the runtime does not model (`unmeasured-heap-texture-size`: a
     /// PVRTC format), at every shape ([`metal_space::unmeasured_size`]). One of protection
     /// options other than none is made as without them, relayed, where Metal answers nil
-    /// ([`crate::gpu::desc::TextureFields::made_unprotected`]).
+    /// ([`crate::gpu::desc::TextureFields::made_unprotected`]). Ours: one the runtime does not
+    /// build yet (`NotImplemented`, a swizzle written through under `writeSwizzleEnabled` among
+    /// them), which Metal makes, is nil outside strict mode, one warning naming its descriptor
+    /// ([`crate::answer::create_texture`]), as from every other texture creator here.
     fn new_texture(
         &self,
         _on: OnFault,
@@ -1305,7 +1309,8 @@ impl GpuDevice<VulkanPlatform> for VulkanDevice {
         };
         let space = Arc::new(metal_space::texture(kind));
         let token: rt::RangeToken = Box::new(Arc::clone(&space));
-        let made = create(sel, Policy::Dies, Nil::Memory, || {
+        let described = || RuntimeDescriptor::of(&fields, &desc).to_string();
+        let made = create_texture(sel, Policy::Dies, Nil::Memory, described, || {
             (self.raw.new_texture_with_range_token(&desc, token))
                 .map_err(|e| format_refused(sel, "a texture of", raw, e))
         })?;
@@ -1403,7 +1408,8 @@ impl GpuDevice<VulkanPlatform> for VulkanDevice {
             return Ok(None);
         };
         let format = fields.raw_pixel_format();
-        let Some(raw) = create(sel, Policy::Dies, Nil::Never, || {
+        let described = || RuntimeDescriptor::of(&fields, &desc).to_string();
+        let Some(raw) = create_texture(sel, Policy::Dies, Nil::Never, described, || {
             (buffer.new_texture_with_iosurface_plane(&desc, plane))
                 .map_err(|e| format_refused(sel, "a texture of", format, e))
         })?
@@ -2326,6 +2332,180 @@ pub(crate) mod tests {
             "newTextureWithDescriptor:iosurface:plane: format 80 MTLPixelFormatBGRA8Unorm, plane \
              0, 16x8, usage 0x1, storage 0; surface 'BGRA', 0 planes: 16x8, 64 bytes per row"
         );
+    }
+
+    /// Ours: the line of a texture the runtime does not build yet names the whole descriptor the
+    /// runtime was given, and beside a value the descriptor holds otherwise (usage bits the
+    /// runtime has no flag for, a private property not sent, a format held raw) the descriptor's
+    #[test]
+    fn a_runtime_descriptor_line_names_the_whole_descriptor() {
+        use reims_vgpu_core::platform::types::Swizzle;
+        use reims_vgpu_core::platform::values::TextureDesc;
+        let written = TextureFields::of(&TextureDesc {
+            texture_type: 2,
+            pixel_format: 70,
+            width: 64,
+            height: 32,
+            usage: 0x3,
+            resource_options: Some(0x20),
+            swizzle: Some(Swizzle {
+                red: 4,
+                green: 3,
+                blue: 2,
+                alpha: 5,
+            }),
+            write_swizzle_enabled: Some(true),
+            ..TextureDesc::default()
+        });
+        let desc = written.descriptor("newTextureWithDescriptor:", Maker::Other);
+        assert_eq!(
+            RuntimeDescriptor::of(&written, &desc).to_string(),
+            "type 2 MTLTextureType2D, pixel format 70 MTLPixelFormatRGBA8Unorm, 64x32x1, mip \
+             levels 1, samples 1, array length 1, usage 0x3, resource options 0x20 (storage mode \
+             2, CPU cache mode 0, hazard tracking mode 0), swizzle (4, 3, 2, 5) Blue Green Red \
+             Alpha, writeSwizzleEnabled true, allowGPUOptimizedContents true, framebufferOnly \
+             false, isDrawable false, rotation 0, resource index any, protection options 0x0"
+        );
+        let sel = "newTextureWithDescriptor:iosurface:plane:";
+        let held = TextureFields::of(&TextureDesc {
+            texture_type: 2,
+            pixel_format: 80,
+            width: 16,
+            height: 8,
+            usage: 0x9,
+            resource_options: Some(0),
+            resource_index: Some((7, true)),
+            protection_options: Some(1),
+            framebuffer_only: Some(true),
+            is_drawable: Some(true),
+            allow_gpu_optimized_contents: Some(false),
+            ..TextureDesc::default()
+        });
+        let desc = held.descriptor(sel, Maker::Surface);
+        assert_eq!(
+            RuntimeDescriptor::of(&held, &desc).to_string(),
+            "type 2 MTLTextureType2D, pixel format 80 MTLPixelFormatBGRA8Unorm, 16x8x1, mip \
+             levels 1, samples 1, array length 1, usage 0x1 (and the descriptor's 0x8, which the \
+             runtime has no flag for), resource options 0x0 (storage mode 0, CPU cache mode 0, \
+             hazard tracking mode 0), swizzle (2, 3, 4, 5) Red Green Blue Alpha, \
+             writeSwizzleEnabled false, allowGPUOptimizedContents false, framebufferOnly false \
+             (the descriptor's true), isDrawable false (the descriptor's true), rotation 0, \
+             resource index 7, protection options 0x1"
+        );
+        let ycbcr = TextureFields::of(&TextureDesc {
+            texture_type: 2,
+            pixel_format: 505,
+            width: 40,
+            height: 24,
+            usage: 0x1,
+            resource_options: Some(0),
+            ..TextureDesc::default()
+        });
+        // 505 held raw, beside the runtime's `MTLPixelFormatInvalid`.
+        let line = RuntimeDescriptor::of(&ycbcr, &ycbcr.desc).to_string();
+        let format = "pixel format 0 MTLPixelFormatInvalid (the descriptor's 505), 40x24x1";
+        assert!(line.contains(format), "{line}");
+    }
+
+    /// Ours: a texture written or rendered through a swizzle under `writeSwizzleEnabled`, which
+    /// Metal makes and the runtime does not build yet (`RuntimeGap::WriteSwizzle`), is nil from
+    /// the device's, a buffer's two, a heap's and the IOSurface creator outside strict mode, and
+    /// dies at each in strict mode, its line naming the gap and the descriptor the runtime was
+    /// given; the shared creator's, which Metal's validation stops (`SwizzleWithWrites`), dies in
+    /// either mode (`metal_tests::write_swizzles_are_made_where_read_alone`)
+    #[test]
+    fn write_swizzled_textures_are_nil_but_in_strict_mode() {
+        use reims_vgpu_core::platform::Platform as _;
+        use reims_vgpu_core::platform::resource::{Buffer as _, Heap as _};
+        use reims_vgpu_core::platform::types::Swizzle;
+        use reims_vgpu_core::platform::values::{HeapDesc, OptionSet, TextureDesc};
+        let p = crate::platform::tests::platform();
+        let desc = |usage, storage: u64| {
+            p.texture_descriptor(&TextureDesc {
+                texture_type: 2,
+                pixel_format: 70,
+                width: 16,
+                height: 16,
+                usage,
+                resource_options: Some(storage << 4),
+                swizzle: Some(Swizzle {
+                    red: 4,
+                    green: 3,
+                    blue: 2,
+                    alpha: 5,
+                }),
+                write_swizzle_enabled: Some(true),
+                ..TextureDesc::default()
+            })
+        };
+        let d = dev();
+        let buffer = d.new_buffer_of_length(OnFault::Die, 0x4000, 0);
+        let buffer = buffer.unwrap().unwrap();
+        let heap = d.new_heap(&HeapDesc {
+            size: 1 << 20,
+            heap_type: 1,
+            options: vec![OptionSet::StorageMode(2)],
+            address_ranges: None,
+            pinned_gpu_address: None,
+        });
+        let heap = heap.unwrap().heap.unwrap();
+        let surface = crate::os::tests::bgra_surface(16, 16);
+        for usage in [0x3, 0x5] {
+            let (private, shared) = (desc(usage, 2), desc(usage, 0));
+            type Made = RaiseResult<Option<VulkanTexture>>;
+            let creators: [(&str, &dyn Fn() -> Made); 5] = [
+                ("newTextureWithDescriptor:", &|| {
+                    d.new_texture(OnFault::Return, &private)
+                }),
+                ("newTextureWithDescriptor:offset:bytesPerRow:", &|| {
+                    buffer.new_texture(OnFault::Return, &shared, 0, 256)
+                }),
+                (
+                    "newLinearTextureWithDescriptor:offset:bytesPerRow:bytesPerImage:",
+                    &|| buffer.new_linear_texture(&shared, 0, 256, 4096),
+                ),
+                ("newTextureWithDescriptor:offset:", &|| {
+                    heap.new_texture(&private, 0)
+                }),
+                ("newTextureWithDescriptor:iosurface:plane:", &|| {
+                    d.new_texture_on_surface(&shared, Some(&surface), 0)
+                }),
+            ];
+            for (sel, make) in creators {
+                let case = format!("usage {usage:#x} {sel}");
+                let before = crate::answer::nil_for_gap_count();
+                assert!(matches!(crate::answer::relaxed(make), Ok(None)), "{case}");
+                assert!(crate::answer::nil_for_gap_count() > before, "{case}");
+                *crate::answer::LAST_LINE.lock() = None;
+                let site = catch_death(|| drop(make())).unwrap_err();
+                let line = crate::answer::LAST_LINE.lock().take().unwrap_or_default();
+                assert_eq!(
+                    (site.kind, site.file),
+                    (DeathKind::Abort, sel),
+                    "{case}: {line}"
+                );
+                for named in [
+                    "not implemented in the runtime yet: WriteSwizzle; the descriptor: type 2 \
+                     MTLTextureType2D, pixel format 70 MTLPixelFormatRGBA8Unorm, 16x16x1",
+                    "swizzle (4, 3, 2, 5) Blue Green Red Alpha, writeSwizzleEnabled true",
+                ] {
+                    assert!(line.contains(named), "{case}: {line}");
+                }
+            }
+            let sel = "newSharedTextureWithDescriptor:";
+            for relaxed in [false, true] {
+                *crate::answer::LAST_LINE.lock() = None;
+                let make = || drop(d.new_shared_texture(&private));
+                let site = match relaxed {
+                    true => catch_death(|| crate::answer::relaxed(make)),
+                    false => catch_death(make),
+                };
+                let line = crate::answer::LAST_LINE.lock().take().unwrap_or_default();
+                let site = site.unwrap_err();
+                assert_eq!((site.kind, site.file), (DeathKind::Abort, sel), "{line}");
+                assert!(line.contains("Texture(SwizzleWithWrites)"), "{line}");
+            }
+        }
     }
 
     /// A multisample texture of the padded 10-bit formats (576 to 579), which the runtime stops

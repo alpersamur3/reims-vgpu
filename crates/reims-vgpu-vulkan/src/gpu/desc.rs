@@ -25,9 +25,12 @@
 //! as set, and sent to the runtime only in a descriptor of such a format, for its validation:
 //! neither changes what a texture holds. `writeSwizzleEnabled` (SPI) is sent to the runtime, which
 //! makes a texture of a swizzle other than the identity read alone, as Metal does, and refuses one
-//! written or rendered, which Metal makes and writes through the swizzle: that dies where it is
-//! made, and the shared creator's, which Metal's validation stops, too
-//! (`write_swizzles_are_made_where_read_alone`). An invalid pixel format and an empty size die, as
+//! written or rendered, which Metal makes and writes through the swizzle (`NotImplemented`,
+//! `RuntimeGap::WriteSwizzle`): ours (ASoftware), that is nil where it is made, one warning naming
+//! the descriptor the runtime was given ([`RuntimeDescriptor`], [`crate::answer::nil_for_gap`]),
+//! and dies there in strict mode (`write_swizzles_are_made_where_read_alone`,
+//! `write_swizzled_textures_are_nil_but_in_strict_mode`); the shared creator's, which Metal's
+//! validation stops, dies in either mode. An invalid pixel format and an empty size die, as
 //! Metal aborts for them, and so does `framebufferOnly` where a texture other than one over an
 //! IOSurface or a shared one is made with it: a device's, a buffer's (linear or not) and a heap's
 //! creators assert it is not set (measured on this host, without API validation:
@@ -273,6 +276,121 @@ pub(crate) fn format_refused(sel: &'static str, what: &str, raw: u64, e: rt::Err
 /// Whether `e` refuses a pixel format (`Unsupported`, `Feature::Format`).
 pub(crate) fn is_format_refusal(e: &rt::Error) -> bool {
     matches!(e, rt::Error::Unsupported(u) if u.feature == metal2vulkan::error::Feature::Format)
+}
+
+/// A texture creator's descriptor as the runtime was given it, for the line of a refusal of what
+/// the runtime does not build yet ([`crate::answer::create_texture`]): its texture type and pixel
+/// format, raw and by Metal's name; its width by height by depth; its mip level count, sample
+/// count and array length; its usage; its resource options, raw and as storage, CPU cache and
+/// hazard tracking modes; its swizzle, each channel raw, red to alpha, then by name;
+/// `writeSwizzleEnabled`, `allowGPUOptimizedContents`, `framebufferOnly` and `isDrawable`; its
+/// rotation; its resource index (`any` where none is set); then the protection options, which
+/// the runtime is not given. Where the descriptor holds a value otherwise than the runtime was
+/// given it (a pixel format held raw, usage bits the runtime has no flag for, a private property
+/// set otherwise), the descriptor's follows in parentheses; the runtime's own properties (alpha
+/// read as 1, an address mode map) are named only where set. A diagnostic: it changes nothing the
+/// guest or the host sees.
+pub struct RuntimeDescriptor<'a> {
+    /// The descriptor's fields.
+    pub fields: &'a TextureFields,
+    /// The runtime's descriptor the creator made of them.
+    pub desc: &'a rt::TextureDescriptor,
+}
+
+impl<'a> RuntimeDescriptor<'a> {
+    /// The line of `desc`, which a creator made of `fields`.
+    pub fn of(fields: &'a TextureFields, desc: &'a rt::TextureDescriptor) -> Self {
+        RuntimeDescriptor { fields, desc }
+    }
+}
+
+impl std::fmt::Display for RuntimeDescriptor<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        /// A private property the runtime was given as `sent`, the descriptor holding `set`
+        /// (`None` where it was not set, which is `false`), and the descriptor's beside it where
+        /// the two differ.
+        fn spi(sent: bool, set: Option<bool>) -> String {
+            match set {
+                Some(set) if set != sent => format!("{sent} (the descriptor's {set})"),
+                None if sent => format!("{sent} (the descriptor's unset)"),
+                _ => sent.to_string(),
+            }
+        }
+        let RuntimeDescriptor { fields, desc: d } = self;
+        let ty = d.texture_type;
+        let pf = d.pixel_format;
+        write!(
+            f,
+            "type {} {}, pixel format {} {}",
+            ty.as_raw(),
+            ty.name(),
+            pf.as_raw(),
+            pf.name()
+        )?;
+        let held = fields.raw_pixel_format();
+        if held != u64::from(pf.as_raw()) {
+            write!(f, " (the descriptor's {held})")?;
+        }
+        write!(
+            f,
+            ", {}x{}x{}, mip levels {}, samples {}, array length {}, usage {:#x}",
+            d.width,
+            d.height,
+            d.depth,
+            d.mipmap_level_count,
+            d.sample_count,
+            d.array_length,
+            d.usage.as_raw()
+        )?;
+        if fields.private_usage != 0 {
+            write!(
+                f,
+                " (and the descriptor's {:#x}, which the runtime has no flag for)",
+                fields.private_usage
+            )?;
+        }
+        let options = d.resource_options.raw();
+        let s = d.swizzle;
+        write!(
+            f,
+            ", resource options {options:#x} (storage mode {}, CPU cache mode {}, hazard \
+             tracking mode {}), swizzle ({}, {}, {}, {}) {:?} {:?} {:?} {:?}",
+            (options >> 4) & 0xf,
+            options & 0xf,
+            (options >> 8) & 0x3,
+            s.red.as_raw(),
+            s.green.as_raw(),
+            s.blue.as_raw(),
+            s.alpha.as_raw(),
+            s.red,
+            s.green,
+            s.blue,
+            s.alpha
+        )?;
+        write!(
+            f,
+            ", writeSwizzleEnabled {}, allowGPUOptimizedContents {}, framebufferOnly {}, \
+             isDrawable {}, rotation {}",
+            spi(d.write_swizzle_enabled, fields.write_swizzle_enabled),
+            d.allow_gpu_optimized_contents,
+            spi(d.framebuffer_only, fields.framebuffer_only),
+            spi(d.is_drawable, fields.is_drawable),
+            d.rotation
+        )?;
+        match d.placement {
+            rt::IdPlacement::Any => f.write_str(", resource index any")?,
+            rt::IdPlacement::At(rt::ResourceId(index)) => write!(f, ", resource index {index}")?,
+            other => write!(f, ", resource index {other:?}")?,
+        }
+        write!(f, ", protection options {:#x}", fields.protection_options)?;
+        if d.alpha_reads_one {
+            f.write_str(", alpha read as 1")?;
+        }
+        if !d.address_mode_map.is_identity() {
+            write!(f, ", address mode map {:?}", d.address_mode_map)?;
+        }
+        Ok(())
+    }
 }
 
 impl TextureFields {

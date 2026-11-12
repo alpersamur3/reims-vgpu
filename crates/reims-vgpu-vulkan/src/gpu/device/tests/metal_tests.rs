@@ -1531,9 +1531,11 @@ fn a_shareable_texture_of_no_width_is_nil_but_private() {
 /// query answers its size and alignment, as Metal's do. Written (`ShaderWrite`) or rendered
 /// (`RenderTarget`), Metal's device, buffer, heap and IOSurface creators make it too and write
 /// through the swizzle, which the runtime does not build: those creators die naming the
-/// runtime's gap (`RuntimeGap::WriteSwizzle`), and the size query answers Metal's size and
-/// alignment. The shared creator dies where Metal's validation stops it (the runtime's
-/// measurement; Metal's side is not run, as its assertion ends the process).
+/// runtime's gap (`RuntimeGap::WriteSwizzle`) in strict mode, as this crate's tests run, and
+/// answer nil by default (ours: `write_swizzled_textures_are_nil_but_in_strict_mode`), and the
+/// size query answers Metal's size and alignment. The shared creator dies where Metal's
+/// validation stops it (the runtime's measurement; Metal's side is not run, as its assertion ends
+/// the process).
 #[test]
 fn write_swizzles_are_made_where_read_alone() {
     use reims_vgpu_core::platform::Platform;

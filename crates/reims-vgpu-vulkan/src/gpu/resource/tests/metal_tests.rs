@@ -1765,8 +1765,9 @@ fn swizzled_extended_range_textures_are_made() {
 /// validation asserts ("Texture Descriptor Validation"), where the runtime's validation stops
 /// it (`SwizzleWithWrites`); with it Metal makes the texture, of the usage asked, and writes
 /// through the swizzle, which the runtime does not build, so this platform dies naming the
-/// gap (`RuntimeGap::WriteSwizzle`). Read alone (`ShaderRead`, and with `PixelFormatView`),
-/// both make it, answering the usage asked.
+/// gap (`RuntimeGap::WriteSwizzle`) in strict mode, as this crate's tests run, and answers nil
+/// by default (ours, `crate::answer::nil_for_gap`). Read alone (`ShaderRead`, and with
+/// `PixelFormatView`), both make it, answering the usage asked.
 #[test]
 fn written_swizzles_over_read_only_memory_are_refused() {
     use crate::os::OsSurface;

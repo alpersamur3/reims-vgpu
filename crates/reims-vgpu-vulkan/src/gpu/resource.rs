@@ -31,12 +31,12 @@ use reims_vgpu_core::raise::{OnFault, RaiseResult};
 use reims_vgpu_core::sync::Mutex;
 
 use crate::answer::{
-    Nil, Policy, create, get, hearing, metal_aborts, plain, plain_at, refused, send,
-    unrepresentable,
+    Nil, Policy, create, create_texture, get, hearing, metal_aborts, plain, plain_at, refused,
+    send, unrepresentable,
 };
 use crate::gpu;
 use crate::gpu::backing::{Backing, REPLACE};
-use crate::gpu::desc::{Maker, VulkanTextureDescriptor, format_refused};
+use crate::gpu::desc::{Maker, RuntimeDescriptor, VulkanTextureDescriptor, format_refused};
 use crate::gpu::device::VulkanDevice;
 use crate::gpu::metal_space::Hold;
 use crate::gpu::writes::{Reflected, Reflection};
@@ -1310,7 +1310,8 @@ impl Buffer<VulkanPlatform> for VulkanBuffer {
             false => 0,
         };
         let format = fields.raw_pixel_format();
-        let Some(raw) = create(sel, Policy::Dies, Nil::Never, || {
+        let described = || RuntimeDescriptor::of(&fields, &desc).to_string();
+        let Some(raw) = create_texture(sel, Policy::Dies, Nil::Never, described, || {
             (self
                 .raw
                 .new_linear_texture(&desc, offset, bytes_per_row, bytes_per_image))
@@ -1347,7 +1348,8 @@ impl Buffer<VulkanPlatform> for VulkanBuffer {
             false => 0,
         };
         let format = fields.raw_pixel_format();
-        let Some(raw) = create(sel, Policy::Dies, Nil::Never, || {
+        let described = || RuntimeDescriptor::of(&fields, &desc).to_string();
+        let Some(raw) = create_texture(sel, Policy::Dies, Nil::Never, described, || {
             buffer_texture_type(sel, self.raw.new_texture(&desc, offset, bytes_per_row))
                 .map_err(|e| format_refused(sel, "a texture of", format, e))
         })?
@@ -2051,8 +2053,15 @@ impl Heap<VulkanPlatform> for VulkanHeap {
         desc.resource_options = with_heap_tracking(sel, desc.resource_options.raw());
         plain(|| self.placed.lock().attempt());
         let format = fields.raw_pixel_format();
+        // Whether the runtime refused what it does not build yet, the one refusal the descriptor
+        // is described for: its nil is no placement's ([`HeapObject::optimized_nil`]).
+        let gap = std::cell::Cell::new(false);
+        let described = || {
+            gap.set(true);
+            RuntimeDescriptor::of(&fields, &desc).to_string()
+        };
         let (made, heard) = hearing(|| {
-            create(sel, Policy::Dies, Nil::Placed, || {
+            create_texture(sel, Policy::Dies, Nil::Placed, described, || {
                 let made = self.raw.new_texture_at_offset(&desc, offset);
                 placed(
                     sel,
@@ -2070,7 +2079,8 @@ impl Heap<VulkanPlatform> for VulkanHeap {
             );
         }
         let optimized = heard.contains(&rt::Degradation::OptimizedDepthStencilTexture);
-        if optimized && matches!(made, Ok(None)) && offset < plain(|| self.raw.size()) {
+        let placement_nil = matches!(made, Ok(None)) && !gap.get();
+        if optimized && placement_nil && offset < plain(|| self.raw.size()) {
             self.optimized_nil(sel, &desc, offset);
         }
         made.map(|t| {
