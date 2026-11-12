@@ -73,6 +73,12 @@ pub(crate) fn counts() -> Counts {
     }
 }
 
+/// The mappings of the backing table's runs outside `except` (sorted, apart), by the maker of
+/// each run, the most first.
+pub(crate) fn mappings_by_maker(except: &[(u64, u64)]) -> Vec<(&'static str, u64)> {
+    files::mappings_by_maker_except(except)
+}
+
 /// The mappings the backing table's runs in each of `ranges` (a first byte and an end) take.
 pub(crate) fn mappings_in(ranges: &[(u64, u64)]) -> Vec<u64> {
     files::mappings_in(ranges)

@@ -412,6 +412,7 @@ fn view(ranges: &[PhysicalMemoryRange], length: u64, read_only: bool) -> Option<
         }
         let now = r.physical_length.min(length - offset);
         let source = HostPtr::from_addr(r.physical_address.to_usize());
+        let _maker = reims_vgpu_core::memory::mapping::maker::scope(reims_vgpu_core::memory::mapping::maker::HOST_SURFACE);
         if vm
             .remap_shared_overwrite(at.wrapping_add(offset), source, now)
             .is_err()

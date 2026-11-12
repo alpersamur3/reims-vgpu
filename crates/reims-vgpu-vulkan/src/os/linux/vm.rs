@@ -213,7 +213,7 @@ pub(crate) fn allocate_aliasable(len: u64) -> Result<HostAddr, KernReturn> {
     let backing = Backing { fd, offset: 0 };
     let prot = libc::PROT_READ | libc::PROT_WRITE;
     let at = file(None, length, &backing, prot)?;
-    files::record(at, length, backing, prot);
+    files::record_by(at, length, backing, prot, reims_vgpu_core::memory::mapping::maker::HOST_RANGE);
     Ok(HostAddr::from_addr(at.to_usize()))
 }
 

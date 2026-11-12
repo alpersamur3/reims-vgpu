@@ -35,6 +35,54 @@ pub enum Teardown<P: Platform> {
     },
 }
 
+/// Ours: who is making the mappings a thread makes now, for a host that counts the kernel's
+/// mappings by maker (the Linux port's views census). A scope names the maker for the calls
+/// beneath it on the thread; the host's `remap_shared_overwrite` reads [`maker::current`] when it
+/// records what it mapped. It changes nothing about what is mapped.
+pub mod maker {
+    use std::cell::Cell;
+
+    /// Mappings no scope names.
+    pub const OTHER: u8 = 0;
+    /// The task pages a no-copy buffer is made over (a transfer buffer, a heap's cover).
+    pub const BUFFER_OVER_PAGES: u8 = 1;
+    /// An object list's mapping.
+    pub const OBJECT_LIST: u8 = 2;
+    /// A mapping behind a host address into task memory, held while the address is used.
+    pub const TASK_ADDRESS: u8 = 3;
+
+    /// The host's own makers, above core's: a range a view can be made of.
+    pub const HOST_RANGE: u8 = 16;
+    /// The remaps of an alias of the guest's pages.
+    pub const HOST_ALIAS: u8 = 17;
+    /// The view of an IOSurface over the guest's pages.
+    pub const HOST_SURFACE: u8 = 18;
+
+    thread_local! {
+        static NOW: Cell<u8> = const { Cell::new(OTHER) };
+    }
+
+    /// The maker now.
+    pub fn current() -> u8 {
+        NOW.with(Cell::get)
+    }
+
+    /// Restores the maker before it when it drops.
+    #[must_use]
+    pub struct Scope(u8);
+
+    /// `maker` makes the mappings of this thread until the scope drops.
+    pub fn scope(maker: u8) -> Scope {
+        Scope(NOW.with(|now| now.replace(maker)))
+    }
+
+    impl Drop for Scope {
+        fn drop(&mut self) {
+            NOW.with(|now| now.set(self.0));
+        }
+    }
+}
+
 /// A host range over guest memory. Shared as `Arc<Mapping<P>>`; the last drop runs the
 /// teardown, so where the last reference goes decides when the host sees the unmap.
 pub struct Mapping<P: Platform> {

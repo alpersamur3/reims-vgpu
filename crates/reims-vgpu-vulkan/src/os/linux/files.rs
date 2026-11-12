@@ -60,6 +60,23 @@ struct Run {
     prot: i32,
     /// A deferred view's run, which the kernel does not map (module docs).
     deferred: bool,
+    /// Who made the run ([`maker_name`]), for the views census; kept by every cut of the run.
+    maker: u8,
+}
+
+/// The name a maker goes by in the census.
+pub(crate) fn maker_name(maker: u8) -> &'static str {
+    use reims_vgpu_core::memory::mapping::maker as core;
+    match maker {
+        core::OTHER => "unscoped remaps",
+        core::BUFFER_OVER_PAGES => "buffers over task pages",
+        core::OBJECT_LIST => "object lists",
+        core::TASK_ADDRESS => "task addresses",
+        core::HOST_RANGE => "ranges",
+        core::HOST_ALIAS => "alias remaps",
+        core::HOST_SURFACE => "surfaces",
+        _ => "unknown",
+    }
 }
 
 /// A registration: `first..end` shows `backing`, read and write, `count` times registered;
@@ -184,7 +201,15 @@ impl Table {
 
     /// `first..end` shows `backing` with protection `prot` from now on (`record`), mapped by
     /// the kernel or `deferred`.
-    fn record(&mut self, first: u64, end: u64, backing: Backing, prot: i32, deferred: bool) {
+    fn record(
+        &mut self,
+        first: u64,
+        end: u64,
+        backing: Backing,
+        prot: i32,
+        deferred: bool,
+        maker: u8,
+    ) {
         self.forget(first, end);
         if first < end {
             let run = Run {
@@ -192,6 +217,7 @@ impl Table {
                 backing,
                 prot,
                 deferred,
+                maker,
             };
             self.insert(first, run);
         }
@@ -260,6 +286,46 @@ impl Table {
     }
 }
 
+impl Table {
+    /// As [`Table::mappings_between`], by the maker of each run: the count of a run joined to the
+    /// one before it is that one's.
+    fn mappings_by_maker(&self, first: u64, end: u64, into: &mut BTreeMap<u8, u64>) {
+        let mut before: Option<(u64, &Run)> = None;
+        for (&at, run) in self.runs.range(first..end) {
+            if run.deferred {
+                before = None;
+                continue;
+            }
+            if !before.is_some_and(|(b_at, b)| joined(b_at, b, at, run)) {
+                *into.entry(run.maker).or_default() += 1;
+            }
+            before = Some((at, run));
+        }
+    }
+}
+
+/// The kernel's mappings the table's runs take, by maker, leaving out those in `except` (ranges,
+/// a first byte and an end each, sorted and apart): for the views census, whose aliases are
+/// counted by class and whose other runs are counted by maker. Read under one lock; the count of
+/// all the runs less the count of the runs in `except`, as [`mappings_in`] counts those.
+pub(crate) fn mappings_by_maker_except(except: &[(u64, u64)]) -> Vec<(&'static str, u64)> {
+    let table = TABLE.lock();
+    let mut all = BTreeMap::new();
+    table.mappings_by_maker(0, u64::MAX, &mut all);
+    let mut aside = BTreeMap::new();
+    for &(first, end) in except {
+        table.mappings_by_maker(first, end, &mut aside);
+    }
+    let mut named: BTreeMap<&'static str, u64> = BTreeMap::new();
+    for (maker, count) in all {
+        let left = count.saturating_sub(aside.get(&maker).copied().unwrap_or(0));
+        *named.entry(maker_name(maker)).or_default() += left;
+    }
+    let mut named: Vec<_> = named.into_iter().filter(|&(_, n)| n > 0).collect();
+    named.sort_by_key(|&(_, n)| std::cmp::Reverse(n));
+    named
+}
+
 /// The kernel's mappings the table's runs in each of `ranges` (a first byte and an end) take, as
 /// [`mappings`] counts them, for the views census (`super::idle`): all read under one lock.
 pub(crate) fn mappings_in(ranges: &[(u64, u64)]) -> Vec<u64> {
@@ -280,17 +346,37 @@ pub(crate) fn mappings_between(first: u64, end: u64) -> u64 {
 /// `length` bytes from `first` show `backing` from now on, with protection `prot`: what of
 /// another run they cover goes.
 pub(crate) fn record(first: u64, length: u64, backing: Backing, prot: i32) {
-    TABLE
-        .lock()
-        .record(first, first.saturating_add(length), backing, prot, false);
+    record_by(first, length, backing, prot, current_maker());
+}
+
+/// [`record`], by `maker`.
+pub(crate) fn record_by(first: u64, length: u64, backing: Backing, prot: i32, maker: u8) {
+    TABLE.lock().record(
+        first,
+        first.saturating_add(length),
+        backing,
+        prot,
+        false,
+        maker,
+    );
+}
+
+/// Who is making mappings on this thread now.
+fn current_maker() -> u8 {
+    reims_vgpu_core::memory::mapping::maker::current()
 }
 
 /// `length` bytes from `first`, in a deferred view, show `backing` from now on, with protection
 /// `prot`, unmapped by the kernel (module docs): what of another run they cover goes.
 pub(crate) fn record_deferred(first: u64, length: u64, backing: Backing, prot: i32) {
-    TABLE
-        .lock()
-        .record(first, first.saturating_add(length), backing, prot, true);
+    TABLE.lock().record(
+        first,
+        first.saturating_add(length),
+        backing,
+        prot,
+        true,
+        current_maker(),
+    );
 }
 
 /// What of the runs lies in `length` bytes from `first` is mapped by the kernel from now on (a

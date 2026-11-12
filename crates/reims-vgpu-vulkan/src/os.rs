@@ -52,7 +52,8 @@ pub(crate) use host_os::{
 pub(crate) use linux::allocate_deferred;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 pub(crate) use linux::{
-    ViewCounts, give_back_view, idle_views_enabled, view_counts, view_mappings, views_census_on,
+    ViewCounts, give_back_view, idle_views_enabled, view_counts, view_makers, view_mappings,
+    views_census_on,
 };
 
 /// No deferred views on this OS: the caller's own range (`os/linux/deferred.rs`).

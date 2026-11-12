@@ -363,7 +363,7 @@ mod real {
     }
 
     /// The census (module docs).
-    #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+    #[derive(Debug, Default, Clone, PartialEq, Eq)]
     pub(crate) struct Census {
         pub(crate) counts: Option<os::ViewCounts>,
         pub(crate) live: Share,
@@ -373,6 +373,8 @@ mod real {
         pub(crate) covers: u64,
         pub(crate) given_back: u64,
         pub(crate) under_pressure: u64,
+        /// The table's runs that are no alias's, by who made them, the most first.
+        pub(crate) makers: Vec<(&'static str, u64)>,
     }
 
     impl Census {
@@ -408,7 +410,7 @@ mod real {
                 "{CENSUS} held {} of budget {} (vm.max_map_count {}); aliases {} holding {} \
                  [live {}/{}, kept for contents {}/{}, runtime only {}/{}, lazy {}/{}]; lazy \
                  windows {} of {} pages; kept covers {}; twins {}; stand-ins {}; other table \
-                 runs {}; given back {} ({} under pressure)",
+                 runs {}; given back {} ({} under pressure); other by maker [{}]",
                 counts.held,
                 counts.budget,
                 counts.limit,
@@ -430,6 +432,10 @@ mod real {
                 other,
                 self.given_back,
                 self.under_pressure,
+                (self.makers.iter())
+                    .map(|(name, held)| format!("{name} {held}"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
             )
         }
     }
@@ -451,6 +457,7 @@ mod real {
             covers: reims_vgpu_core::resources::heap::detach::kept_covers().to_u64(),
             given_back: GIVEN_BACK.load(Ordering::Relaxed),
             under_pressure: UNDER_PRESSURE.load(Ordering::Relaxed),
+            makers: os::view_makers(&ranges),
             ..Census::default()
         };
         for (&(_, _, class), &held) in entries.iter().zip(&mappings) {
@@ -487,6 +494,7 @@ mod real {
                 covers: 7,
                 given_back: 5,
                 under_pressure: 2,
+                makers: vec![("buffers over task pages", 800), ("object lists", 100)],
                 ..Census::default()
             };
             census.add(Class::Live, 900);
@@ -509,6 +517,7 @@ mod real {
                 "stand-ins 4",
                 "other table runs 900",
                 "given back 5 (2 under pressure)",
+                "other by maker [buffers over task pages 800, object lists 100]",
             ] {
                 assert!(line.contains(part), "{part}: {line}");
             }

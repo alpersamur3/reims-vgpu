@@ -145,6 +145,7 @@ impl<P: Platform> GpuTask<P> {
         let start = offset & !PAGE_MASK;
         // Wrapping, unchecked
         let end = offset.wrapping_add(length).wrapping_add(PAGE_MASK) & !PAGE_MASK;
+        let _maker = crate::memory::mapping::maker::scope(crate::memory::mapping::maker::TASK_ADDRESS);
         let mapping =
             self.new_virtual_mapping(hold, start, end.wrapping_sub(start), need_writable)?;
         let Some(mapping) = mapping else {
@@ -489,12 +490,16 @@ impl<P: Platform> GpuTask<P> {
         page: u32,
         length: u64,
     ) -> RaiseResult<P::Buffer> {
+        let maker = crate::memory::mapping::maker::scope(
+            crate::memory::mapping::maker::BUFFER_OVER_PAGES,
+        );
         let mapping = self.new_virtual_mapping(
             hold,
             u64::from(page).wrapping_shl(APV_PAGE_SHIFT),
             length,
             false,
         )?;
+        drop(maker);
         let Some(mapping) = mapping else {
             return raise_caught(
                 RaiseKind::NoBufferMapping,

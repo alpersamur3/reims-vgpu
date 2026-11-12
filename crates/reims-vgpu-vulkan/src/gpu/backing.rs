@@ -1141,6 +1141,9 @@ pub(crate) fn gather(
         kept: AtomicBool::new(false),
         tag: idle::made(at.addr().to_u64(), length),
     };
+    let _maker = reims_vgpu_core::memory::mapping::maker::scope(
+        reims_vgpu_core::memory::mapping::maker::HOST_ALIAS,
+    );
     for run in runs {
         let source = HostPtr::from_addr(usize::try_from(run.source).ok()?);
         if let Err(kr) = vm.remap_shared_overwrite(at.wrapping_add(run.offset), source, run.length)

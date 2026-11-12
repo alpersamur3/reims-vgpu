@@ -241,6 +241,7 @@ impl<P: Platform> ObjectLists<P> {
         if legacy {
             return None;
         }
+        let _maker = crate::memory::mapping::maker::scope(crate::memory::mapping::maker::OBJECT_LIST);
         let mapped = match self.task.upgrade() {
             Some(task) => task.new_virtual_mapping(hold, offset, length, writable),
             None => Ok(None),
