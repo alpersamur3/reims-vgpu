@@ -544,6 +544,9 @@ impl Drop for Backing {
         }
         if let Some(alias) = &self.alias.lock().last {
             idle::released(alias);
+            if self.heap {
+                idle::heap_dropped(alias);
+            }
         }
         let own = self.alias.lock().own.take();
         if let Some(own) = own {

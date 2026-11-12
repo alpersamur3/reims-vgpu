@@ -19,8 +19,17 @@
 //!   ([`crate::os::give_back_view`]): its mappings become one reservation whose pages the CPU's
 //!   touch maps again from the backing table, so `contents` reads the same bytes at the same
 //!   address. Only kept aliases are: a live alias may be imported, and the driver's pin of
-//!   pages under a mapping is not for this module to move; a runtime-only alias is imported by
-//!   definition.
+//!   pages under a mapping is not for this module to move.
+//! - **Dropped heaps.** The exception is the alias of a heap that dropped
+//!   ([`heap_dropped`]): its runtime heap lives on while core parks its cover buffer
+//!   (`KEPT_COVERS`, until the device tears its tasks down), and the runtime's keep-alive holds the
+//!   alias with every mapping for the whole run (307 covers held about 18,000 mappings on the
+//!   phone). Nothing reads such a heap's `contents` (core keeps the cover for Metal's numbering
+//!   alone), and the guest deleted its pages' use, so after a few seconds, for commands still in
+//!   flight, the alias is made lazy, not freed: the address the runtime's import was made at
+//!   stays mapped (one reservation), the same file pages show through it when touched, and the
+//!   driver's pin of pages, if it has one, is of the same file pages. That last is an
+//!   assumption about the driver this repository cannot check.
 //!   Giving back is on unless `REIMS_VGPU_IDLE_VIEWS=0` (on Android; `1` elsewhere,
 //!   `crate::os`'s `idle`). It happens a few seconds after the detach once the runtime let go
 //!   ([`tick`]), and at once for the oldest first where the budget would end the process
@@ -60,13 +69,15 @@ mod none {
 
     pub(crate) fn released(_alias: &Arc<Alias>) {}
 
+    pub(crate) fn heap_dropped(_alias: &Arc<Alias>) {}
+
     pub(crate) fn tick() {}
 }
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
 mod real {
     use std::collections::{BTreeMap, VecDeque};
-    use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
     use std::sync::{Arc, OnceLock, Weak};
     use std::time::{Duration, Instant};
 
@@ -113,6 +124,8 @@ mod real {
     #[derive(Debug, Default)]
     pub(crate) struct Tag {
         class: AtomicU8,
+        /// Its object was a heap that dropped ([`heap_dropped`]).
+        heap_gone: AtomicBool,
     }
 
     impl Tag {
@@ -143,6 +156,9 @@ mod real {
 
     /// The aliases alive, by their first byte: their length and class.
     static REGISTRY: Mutex<BTreeMap<u64, (u64, Arc<Tag>)>> = Mutex::new(BTreeMap::new());
+
+    /// The aliases of heaps that dropped, not given back yet, oldest first, and when each did.
+    static ORPHANS: Mutex<VecDeque<(Weak<Alias>, Instant)>> = Mutex::new(VecDeque::new());
 
     /// The kept aliases not given back yet, oldest first, and when each was detached.
     static CANDIDATES: Mutex<VecDeque<(Weak<Alias>, Instant)>> = Mutex::new(VecDeque::new());
@@ -178,6 +194,21 @@ mod real {
     pub(crate) fn detached(alias: &Arc<Alias>) {
         if alias.tag().moved(Class::Live, Class::Kept) && os::idle_views_enabled() {
             CANDIDATES
+                .lock()
+                .push_back((Arc::downgrade(alias), Instant::now()));
+        }
+    }
+
+    /// The heap holding `alias` dropped. Its runtime heap may live on, retained by the cover
+    /// buffer core parks until the device tears its tasks down (`KEPT_COVERS`), and with it the
+    /// runtime's keep-alive of the alias, with all its mappings; nothing reads the heap's
+    /// `contents` any more, and the guest deleted it, so the alias is given back (module docs)
+    /// after a few seconds for the commands that may still use it to complete, rather than
+    /// freed: the address stays valid for the runtime's import, and the bytes the same.
+    pub(crate) fn heap_dropped(alias: &Arc<Alias>) {
+        alias.tag().heap_gone.store(true, Ordering::Release);
+        if os::idle_views_enabled() {
+            ORPHANS
                 .lock()
                 .push_back((Arc::downgrade(alias), Instant::now()));
         }
@@ -237,7 +268,27 @@ mod real {
                 .filter_map(|(alias, _)| alias.upgrade())
                 .collect()
         };
+        let orphans: Vec<Arc<Alias>> = {
+            let mut list = ORPHANS.lock();
+            list.retain(|(alias, _)| {
+                alias
+                    .upgrade()
+                    .is_some_and(|alias| alias.tag().class() == Class::RuntimeOnly)
+            });
+            list.iter()
+                .filter(|(_, since)| older_than.is_none_or(|age| since.elapsed() >= age))
+                .filter_map(|(alias, _)| alias.upgrade())
+                .collect()
+        };
         let mut given = 0;
+        for alias in &orphans {
+            if enough() {
+                break;
+            }
+            if give_back_orphan(alias) {
+                given += 1;
+            }
+        }
         for alias in &ready {
             if enough() {
                 break;
@@ -265,6 +316,22 @@ mod real {
             return false;
         }
         alias.tag().moved(Class::Kept, Class::Lazy);
+        true
+    }
+
+    /// Gives back the alias of a heap that dropped, whatever holds it: only the runtime's import
+    /// of it does, of a heap nothing uses but commands already submitted. Its object's `contents`
+    /// is gone, so the CPU never touches it; a pinned import keeps the same file pages.
+    fn give_back_orphan(alias: &Arc<Alias>) -> bool {
+        let tag = alias.tag();
+        if !tag.heap_gone.load(Ordering::Acquire) || tag.class() != Class::RuntimeOnly {
+            return false;
+        }
+        let (first, length) = alias.span();
+        if !os::give_back_view(first, length) {
+            return false;
+        }
+        tag.moved(Class::RuntimeOnly, Class::Lazy);
         true
     }
 
