@@ -44,6 +44,13 @@ type KeptCover = Box<dyn std::any::Any + Send>;
 static KEPT_COVERS: parking_lot::Mutex<Vec<(usize, KeptCover)>> =
     parking_lot::Mutex::new(Vec::new());
 
+/// Ours: how many cover buffers of detached heaps are kept now, across every platform, for the
+/// views census of a host that counts the mappings its views hold (`reims-vgpu-vulkan`'s Linux
+/// OS layer). The count only: a cover is opaque here.
+pub fn kept_covers() -> usize {
+    KEPT_COVERS.lock().len()
+}
+
 fn platform_key<P>(platform: &Arc<P>) -> usize {
     Arc::as_ptr(platform).cast::<()>().addr()
 }

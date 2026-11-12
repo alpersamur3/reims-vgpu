@@ -31,6 +31,7 @@ pub mod event;
 pub mod fill;
 pub mod format_info;
 pub mod icb;
+pub mod idle;
 pub mod metal_space;
 pub mod no_texture;
 pub mod over_pages;

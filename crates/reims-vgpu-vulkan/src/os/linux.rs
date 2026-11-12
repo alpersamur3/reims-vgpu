@@ -11,6 +11,7 @@ mod deferred;
 mod dma_buf;
 mod files;
 mod hints;
+mod idle;
 mod import;
 mod surface;
 mod threads;
@@ -31,6 +32,12 @@ pub(crate) use import::{
     TWINS_READ_ONLY, allocate_zeros, dma_buf_refusal, host_memory, import_view, shown_at,
 };
 pub(crate) use surface::{plane_at, plane_shape, recorded_mut, surface_memory_hold, ycbcr_matrix};
+pub(crate) use idle::{
+    Counts as ViewCounts, census_on as views_census_on, counts as view_counts,
+    enabled as idle_views_enabled, give_back as give_back_view, mappings_in as view_mappings,
+};
+#[cfg(test)]
+pub(crate) use idle::TEST_ON as IDLE_TEST_ON;
 pub(crate) use vm::allocate_aliasable;
 
 /// A fresh deferred view of `length` bytes over the guest's pages `spans` (host addresses and

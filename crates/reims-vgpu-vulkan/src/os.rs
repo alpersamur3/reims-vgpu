@@ -50,6 +50,10 @@ pub(crate) use host_os::{
 };
 #[cfg(any(target_os = "linux", target_os = "android"))]
 pub(crate) use linux::allocate_deferred;
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub(crate) use linux::{
+    ViewCounts, give_back_view, idle_views_enabled, view_counts, view_mappings, views_census_on,
+};
 
 /// No deferred views on this OS: the caller's own range (`os/linux/deferred.rs`).
 #[cfg(not(any(target_os = "linux", target_os = "android")))]
@@ -65,6 +69,8 @@ pub use host_os::{
 };
 #[cfg(test)]
 pub(crate) use host_os::{PAGE, mapped, writable};
+#[cfg(all(test, any(target_os = "linux", target_os = "android")))]
+pub(crate) use linux::IDLE_TEST_ON;
 #[cfg(all(test, target_os = "macos"))]
 pub(crate) use macos::MATRIX_KEY;
 pub use wsi::{add_window_extensions, present_fences};

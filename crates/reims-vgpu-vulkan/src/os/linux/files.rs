@@ -241,24 +241,40 @@ pub(crate) fn mappings() -> u64 {
     TABLE.lock().mappings().to_u64()
 }
 
+impl Table {
+    /// The kernel's mappings the runs in `first..end` take, as [`Table::mappings`] counts them.
+    fn mappings_between(&self, first: u64, end: u64) -> u64 {
+        let mut count = 0u64;
+        let mut before: Option<(u64, &Run)> = None;
+        for (&at, run) in self.runs.range(first..end) {
+            if run.deferred {
+                before = None;
+                continue;
+            }
+            if !before.is_some_and(|(b_at, b)| joined(b_at, b, at, run)) {
+                count += 1;
+            }
+            before = Some((at, run));
+        }
+        count
+    }
+}
+
+/// The kernel's mappings the table's runs in each of `ranges` (a first byte and an end) take, as
+/// [`mappings`] counts them, for the views census (`super::idle`): all read under one lock.
+pub(crate) fn mappings_in(ranges: &[(u64, u64)]) -> Vec<u64> {
+    let table = TABLE.lock();
+    ranges
+        .iter()
+        .map(|&(first, end)| table.mappings_between(first, end))
+        .collect()
+}
+
 /// The kernel's mappings the table's runs in `first..end` take, as [`mappings`] counts them
 /// (tests: a range's count to set beside the kernel's).
 #[cfg(test)]
 pub(crate) fn mappings_between(first: u64, end: u64) -> u64 {
-    let table = TABLE.lock();
-    let mut count = 0u64;
-    let mut before: Option<(u64, &Run)> = None;
-    for (&at, run) in table.runs.range(first..end) {
-        if run.deferred {
-            before = None;
-            continue;
-        }
-        if !before.is_some_and(|(b_at, b)| joined(b_at, b, at, run)) {
-            count += 1;
-        }
-        before = Some((at, run));
-    }
-    count
+    TABLE.lock().mappings_between(first, end)
 }
 
 /// `length` bytes from `first` show `backing` from now on, with protection `prot`: what of
@@ -437,8 +453,9 @@ pub fn lease_guest_memory(ranges: impl IntoIterator<Item = GuestRamFile>) -> Gue
         .map(|r| r.end - r.first)
         .fold(0u64, u64::saturating_add);
     super::budget::warn_if_short(guest_ram);
-    // The deferred views' fault handler, before QEMU's vCPUs run (`super::deferred`).
-    if super::deferred::enabled() {
+    // The deferred views' fault handler, before QEMU's vCPUs run (`super::deferred`); the idle
+    // views' too (`super::idle`), whose lazy views the same handler maps.
+    if super::deferred::enabled() || super::idle::enabled() {
         super::deferred::install_handler();
     }
     GuestMemoryLease {

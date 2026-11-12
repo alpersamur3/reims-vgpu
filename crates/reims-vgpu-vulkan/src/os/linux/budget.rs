@@ -136,21 +136,70 @@ pub(super) fn held() -> u64 {
         .saturating_add(OWN_MAPPINGS.load(Ordering::Relaxed))
 }
 
+/// What the budget counts, for the views census (`super::idle`): the mappings the views hold, the
+/// limit as last read, the budget under it, and the import twins' and stand-ins' share of the
+/// held ones.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Counted {
+    pub(super) held: u64,
+    pub(super) limit: u64,
+    pub(super) budget: u64,
+    pub(super) twins: u64,
+    pub(super) stand_ins: u64,
+}
+
+/// The budget's counts now.
+pub(super) fn counted() -> Counted {
+    let limit = limit();
+    Counted {
+        held: held(),
+        limit,
+        budget: budget(limit),
+        twins: TWIN_MAPPINGS.load(Ordering::Relaxed),
+        stand_ins: OWN_MAPPINGS.load(Ordering::Relaxed),
+    }
+}
+
+/// Whether `adding` more mappings fit the budget now, at the limit read again where they do not
+/// at the one read before (module docs).
+pub(super) fn fits(adding: u64) -> bool {
+    fits_held(held(), adding)
+}
+
+/// [`fits`] with the `held` mappings the caller read.
+fn fits_held(held: u64, adding: u64) -> bool {
+    let wanted = held.saturating_add(adding);
+    wanted <= budget(limit()) || wanted <= budget(reread())
+}
+
 /// Lets `what` add up to `adding` mappings, or ends the process where the views would pass the
 /// budget with them, at the limit read again (module docs): the death names `what`, the
 /// mappings the views hold and the process holds, the limit, the reserve and the setting that
 /// gives room. Threads that weigh views at once may pass it by what they add between them, which
 /// the reserve covers.
+///
+/// Where they would pass it, the idle views are given back first, the oldest first, as many as
+/// it takes ([`crate::gpu::idle::give_back_for`]); the death is for what that does not make room
+/// for.
 pub(super) fn admit(adding: u64, what: &'static str) {
+    if fits(adding) {
+        return;
+    }
+    if crate::gpu::idle::give_back_for(|| fits(adding)) {
+        return;
+    }
+    admit_held(adding, what);
+}
+
+/// [`admit`] for a caller that holds a lock the idle views' give-back takes (a lazy view's
+/// window mapped by the fault handler, under the deferred views' lock): the death is the same,
+/// and no view is given back for it, so the caller makes room of its own first.
+pub(super) fn admit_held(adding: u64, what: &'static str) {
     let held = held();
-    let wanted = held.saturating_add(adding);
-    if wanted <= budget(limit()) {
+    if fits_held(held, adding) {
         return;
     }
     let limit = reread();
-    if wanted <= budget(limit) {
-        return;
-    }
     let (mappings, _) = super::vm::map_census();
     fatal_with_detail(
         DeathId::Platform {
@@ -279,6 +328,19 @@ mod tests {
         }
         assert_ne!(import::import_view(p, PAGE).at(), p, "a twin with room");
         assert!(v.deallocate(at, 2 * PAGE).is_success());
+    }
+
+    /// Mappings fit while the held ones and they stay within the budget, and a count the budget
+    /// has no room for does not, whatever else is held
+    #[test]
+    fn mappings_fit_the_room_the_budget_has() {
+        let room = Limit::room(1000);
+        assert!(fits(10));
+        assert!(!fits(5000));
+        drop(room);
+        let counted = counted();
+        assert_eq!(counted.held, held());
+        assert_eq!(counted.budget, budget(counted.limit));
     }
 
     /// The death names what would be mapped, the mappings, the limit, the reserve and a setting

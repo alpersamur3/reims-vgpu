@@ -15,6 +15,13 @@
 //!   to no access (one `mmap` of no access over it, which the kernel joins to the reservation),
 //!   and a later touch maps it again. A thread whose window went while it used it faults again
 //!   and has it mapped again: the bytes are the same file pages either way.
+//! - **Lazy views** ([`make_lazy`]). With deferred views off, a view that nobody needs mapped
+//!   any more (a detached object's alias, which only its `contents` pointer keeps) is given
+//!   back to the kernel in place: its one reservation takes the address range over, its runs
+//!   stay in the table as deferred runs, and the CPU's touch maps a window of them again, as in
+//!   a deferred view. What differs: a lazy view's windows are charged against the budget of
+//!   mappings ([`super::budget`]) as they are mapped, and credited as they go, which a deferred
+//!   view's are not, being bounded by [`MAX_PAGES`] alone.
 //! - **Which views.** A view whose every byte is the guest's RAM ([`super::files::guest_place`]):
 //!   the aliases of the guest's ranges a heap, a replace or a surface's buffer is made over
 //!   (`crate::gpu::backing::gather`), and an IOSurface over several ranges of them
@@ -37,6 +44,7 @@ use reims_vgpu_core::num::{ToU64, ToUsize};
 use reims_vgpu_core::platform::os::vm::{HostAddr, KernReturn};
 use reims_vgpu_core::sync::Mutex;
 
+use super::budget;
 use super::files;
 use super::vm;
 
@@ -48,11 +56,13 @@ pub(super) const WINDOW: u64 = 128 << 10;
 /// kernel mapping at most.
 const MAX_PAGES: u64 = 16_384;
 
-/// One deferred view: its end, and whether it is mapped for good (module docs).
+/// One deferred view: its end, whether it is mapped for good, and whether it is a lazy view, an
+/// eager one given back ([`make_lazy`]) whose windows count against the budget (module docs).
 #[derive(Debug)]
 struct View {
     end: u64,
     pinned: bool,
+    lazy: bool,
 }
 
 /// The deferred views and the windows the CPU's touches mapped, oldest first.
@@ -125,6 +135,29 @@ impl State {
         files::set_deferred(at, length, true);
     }
 
+    /// Charges the budget of mappings for the window `first..end` of a lazy view, which the
+    /// caller maps next: the oldest windows go back to no access first, as many as it takes to
+    /// make the mappings fit, and the process ends (the budget's death) where there are none
+    /// left to drop. The idle views are not given back for it: this runs under [`STATE`]'s
+    /// lock, which giving them back takes, and in a fault handler. `false` where a byte of the
+    /// window has no file.
+    fn charge(&mut self, first: u64, end: u64) -> bool {
+        let Some(pieces) = files::pieces(first, end - first) else {
+            return false;
+        };
+        let adding = vm::mappings_added(&pieces);
+        while !budget::fits(adding) {
+            let Some(at) = self.order.pop_front() else {
+                break;
+            };
+            if let Some(&length) = self.windows.get(&at) {
+                self.drop_window(at, length);
+            }
+        }
+        budget::admit_held(adding, "a lazy view's window");
+        true
+    }
+
     /// Makes room for `pages` more mapped pages, dropping the oldest windows past the most
     /// ([`max_pages`]).
     fn make_room(&mut self, pages: u64) {
@@ -158,6 +191,7 @@ static HIGH: AtomicU64 = AtomicU64::new(0);
 static FAULTS: AtomicU64 = AtomicU64::new(0);
 static VIEWS_MADE: AtomicU64 = AtomicU64::new(0);
 static PINNED: AtomicU64 = AtomicU64::new(0);
+static LAZY_MADE: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(test)]
 thread_local! {
@@ -219,6 +253,7 @@ pub(crate) fn allocate(length: u64) -> Result<HostAddr, KernReturn> {
         View {
             end: at + length,
             pinned: false,
+            lazy: false,
         },
     );
     LOW.fetch_min(at, Ordering::AcqRel);
@@ -226,6 +261,94 @@ pub(crate) fn allocate(length: u64) -> Result<HostAddr, KernReturn> {
     VIEWS_MADE.fetch_add(1, Ordering::Relaxed);
     report();
     Ok(HostAddr::from_addr(at.to_usize()))
+}
+
+/// Gives the eager view of `length` bytes from `first` back to the kernel without freeing the
+/// range (module docs, "Lazy views"): its mappings become one reservation with no access, its
+/// runs deferred runs in the table, and a touch of the CPU maps a window of them again. `true`
+/// where the view is lazy now; `false`, nothing changed, where the range is not whole host
+/// pages, meets a deferred view, or has a byte with no file in the table.
+///
+/// - **Why it is sound for a view made eagerly.** A deferred view is nothing but a reservation
+///   with no access, deferred runs in the table and an entry here, which the fault handler
+///   maps from the table; an eager view's runs are in the table already, so the entry and the
+///   reservation are all it lacks. The mmap that makes the reservation replaces the view's
+///   mappings atomically (`MAP_FIXED`), at the same address, so every pointer into it stays
+///   valid, and what a pointer reads after the fault is the same file pages the replaced
+///   mappings showed, shared. The entry goes in first, under [`STATE`]'s lock, which the fault
+///   handler takes: a thread that touches the view meanwhile faults on the reservation, waits
+///   for the lock and has its window mapped when the conversion is done, never seeing a view
+///   the handler does not know. [`LOW`] and [`HIGH`] take the view in before the reservation.
+/// - **What it needs of the caller.** Nothing of the library's reaches the view's pages by any
+///   way but the CPU's pointer: the runtime holds no import of it (an import of host pointer
+///   memory is the driver's pin of the pages under that mapping, which a reservation put over it
+///   would leave to the driver), and no thread has the view's address in a system call that
+///   would answer `EFAULT` for a page not mapped yet, where the CPU's access would fault and
+///   be mapped.
+pub(crate) fn make_lazy(first: u64, length: u64) -> bool {
+    let page = vm::page_size();
+    let Some(end) = first.checked_add(length) else {
+        return false;
+    };
+    if length == 0 || !first.is_multiple_of(page) || !length.is_multiple_of(page) {
+        return false;
+    }
+    install_handler();
+    let mut state = STATE.lock();
+    if state.view_at(first).is_some() || state.views.range(first..end).next().is_some() {
+        return false;
+    }
+    if files::pieces(first, length).is_none() {
+        return false;
+    }
+    state.views.insert(
+        first,
+        View {
+            end,
+            pinned: false,
+            lazy: true,
+        },
+    );
+    LOW.fetch_min(first, Ordering::AcqRel);
+    HIGH.fetch_max(end, Ordering::AcqRel);
+    // SAFETY: the view's own range, which nothing of the library's imports (the caller's
+    // promise); the reservation replaces its mappings at the same address and the fault handler
+    // maps them again from the table.
+    let reserved = unsafe {
+        libc::mmap(
+            vm::ptr(first),
+            length.to_usize(),
+            libc::PROT_NONE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_NORESERVE | libc::MAP_FIXED,
+            -1,
+            0,
+        )
+    };
+    if reserved == libc::MAP_FAILED {
+        state.views.remove(&first);
+        log::error!(
+            target: "reims_vgpu_vulkan::os",
+            "a view of {length:#x} bytes at {first:#x} stays mapped, not given back: {}",
+            std::io::Error::last_os_error()
+        );
+        // The kernel may have dropped what it mapped before it refused: the same pages again.
+        map_from_table(first, length);
+        return false;
+    }
+    files::set_deferred(first, length, true);
+    LAZY_MADE.fetch_add(1, Ordering::Relaxed);
+    true
+}
+
+/// The lazy views, and the windows and pages mapped of all deferred views, for the views census
+/// ([`super::idle`]).
+pub(super) fn lazy_census() -> (usize, usize, u64) {
+    let state = STATE.lock();
+    (
+        state.views.values().filter(|v| v.lazy).count(),
+        state.windows.len(),
+        state.pages,
+    )
 }
 
 /// Whether `length` bytes from `first` lie in one deferred view.
@@ -292,9 +415,9 @@ pub(crate) fn release(first: u64, length: u64) {
     }
     let end = first.saturating_add(length);
     let mut state = STATE.lock();
-    let meeting: Vec<(u64, u64, bool)> = (state.views.range(..end).rev())
+    let meeting: Vec<(u64, u64, bool, bool)> = (state.views.range(..end).rev())
         .take_while(|(_, view)| view.end > first)
-        .map(|(&at, view)| (at, view.end, view.pinned))
+        .map(|(&at, view)| (at, view.end, view.pinned, view.lazy))
         .collect();
     if meeting.is_empty() {
         return;
@@ -319,7 +442,7 @@ pub(crate) fn release(first: u64, length: u64) {
             }
         }
     }
-    for (at, view_end, pinned) in meeting {
+    for (at, view_end, pinned, lazy) in meeting {
         state.views.remove(&at);
         if at < first {
             state.views.insert(
@@ -327,6 +450,7 @@ pub(crate) fn release(first: u64, length: u64) {
                 View {
                     end: first,
                     pinned,
+                    lazy,
                 },
             );
         }
@@ -336,6 +460,7 @@ pub(crate) fn release(first: u64, length: u64) {
                 View {
                     end: view_end,
                     pinned,
+                    lazy,
                 },
             );
         }
@@ -357,8 +482,11 @@ fn pin(first: u64, length: u64) -> bool {
     if view.pinned {
         return true;
     }
-    let view_end = view.end;
+    let (view_end, lazy) = (view.end, view.lazy);
     state.unmap_windows(view_first, view_end);
+    if lazy && !state.charge(view_first, view_end) {
+        return false;
+    }
     if !map_from_table(view_first, view_end - view_first) {
         return false;
     }
@@ -401,7 +529,7 @@ fn materialize(at: u64) -> bool {
     if view.pinned {
         return false;
     }
-    let view_end = view.end;
+    let (view_end, lazy) = (view.end, view.lazy);
     let first = view_first + (at - view_first) / WINDOW * WINDOW;
     let end = (first + WINDOW).min(view_end);
     if let Some((&window, &length)) = state.windows.range(..=at).next_back()
@@ -415,6 +543,9 @@ fn materialize(at: u64) -> bool {
     state.unmap_windows(first, end);
     let pages = (end - first) / vm::page_size();
     state.make_room(pages);
+    if lazy && !state.charge(first, end) {
+        return false;
+    }
     if !map_from_table(first, end - first) {
         return false;
     }
@@ -657,6 +788,52 @@ mod tests {
         STATE.lock().make_room(max_pages());
         assert_eq!(files::mappings_between(at, end), 0, "dropped");
         assert_eq!(vm::tests::kernel_mappings(at, end), 1, "joined again");
+        assert_eq!(read(at), 0xa5);
+        assert!(v.deallocate(HostAddr::from_addr(at.to_usize()), pages * p).is_success());
+        assert!(!holds(at, 1));
+        assert!(v.deallocate(HostAddr::from_addr(src.to_usize()), pages * p).is_success());
+    }
+
+    /// An eager view of scattered pages given back holds one mapping, not a run a page; its
+    /// address and its bytes stay, the CPU's touch maps a window of its runs again (the same
+    /// pages, both ways), a window the budget has no room for takes the oldest windows' place,
+    /// and the view goes as any range does
+    #[test]
+    fn an_eager_view_given_back_maps_again_on_the_cpus_touch() {
+        let v = super::super::LinuxVm::new();
+        let p = vm::page_size();
+        let window = WINDOW / p;
+        let pages = 3 * window;
+        let src = vm::allocate_aliasable(pages * p).unwrap();
+        let src = src.addr().to_u64();
+        for i in 0..pages {
+            write(src + i * p, i as u8);
+        }
+        let at = v.allocate_anywhere(pages * p).unwrap();
+        let end = at.addr().to_u64() + pages * p;
+        let at = at.addr().to_u64();
+        // In reverse order: a run, and a kernel mapping, each.
+        for i in 0..pages {
+            let from = HostAddr::from_addr((src + (pages - 1 - i) * p).to_usize());
+            v.remap_shared_overwrite(HostAddr::from_addr((at + i * p).to_usize()), from, p)
+                .unwrap();
+        }
+        assert_eq!(files::mappings_between(at, end), pages, "eager: a run a page");
+        assert_eq!(vm::tests::kernel_mappings(at, end), pages);
+        assert!(!make_lazy(at + 1, p), "whole pages only");
+        assert!(make_lazy(at, pages * p));
+        assert!(!make_lazy(at, pages * p), "not twice");
+        assert_eq!(files::mappings_between(at, end), 0, "credited: no mapping");
+        assert_eq!(vm::tests::kernel_mappings(at, end), 1, "the reservation");
+        // The same address shows the same bytes, and a window of mappings is charged.
+        assert_eq!(read(at + p), (pages - 2) as u8);
+        assert_eq!(files::mappings_between(at, end), window, "the first window");
+        write(at, 0xa5);
+        assert_eq!(read(src + (pages - 1) * p), 0xa5, "the guest's page");
+        // Room for one window more but not two: the touch maps a window of another stretch.
+        budget::set_test_limit(Some(budget::held() + budget::RESERVE + window + 4));
+        assert_eq!(read(at + 2 * window * p), (pages - 1 - 2 * window) as u8);
+        budget::set_test_limit(None);
         assert_eq!(read(at), 0xa5);
         assert!(v.deallocate(HostAddr::from_addr(at.to_usize()), pages * p).is_success());
         assert!(!holds(at, 1));

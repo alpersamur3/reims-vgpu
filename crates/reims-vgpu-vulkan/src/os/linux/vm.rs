@@ -374,7 +374,7 @@ fn put_back(at: u64, length: u64) {
 /// The most mappings a view of `pieces` adds: one for each run of them the kernel holds as one
 /// (each piece following the one before in the same file at the same protection), and one more
 /// where the view cuts a run of its target in two.
-fn mappings_added(pieces: &[files::Piece]) -> u64 {
+pub(super) fn mappings_added(pieces: &[files::Piece]) -> u64 {
     let follows = |a: &files::Piece, b: &files::Piece| {
         Arc::ptr_eq(&a.backing.fd, &b.backing.fd)
             && a.backing.offset + a.length == b.backing.offset

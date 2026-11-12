@@ -161,6 +161,7 @@ use reims_vgpu_core::rt::BlockEnv;
 use reims_vgpu_core::sync::Mutex;
 use reims_vgpu_core::tasks::isolation::TaskLife;
 
+use super::idle;
 use crate::answer::unrepresentable;
 use crate::gpu::over_pages::Seen;
 use crate::os::OsVm;
@@ -401,6 +402,12 @@ impl Backing {
         DETACHED.lock().detached(id);
         self.seen.forget_uses();
         self.seen.zero();
+        // What the object keeps of its pages is its `contents` pointer alone from now on: idle
+        // once the runtime lets go of its import ([`idle`]).
+        if let Some(alias) = &self.alias.lock().last {
+            idle::detached(alias);
+        }
+        idle::tick();
     }
 
     /// Where the object's `contents` stays while it is detached: the first byte of the alias of
@@ -505,7 +512,9 @@ impl Backing {
         let own = {
             let mut aliased = self.alias.lock();
             self.kept.store(alias.writes_kept(), Ordering::Release);
-            aliased.last = Some(alias);
+            if let Some(old) = aliased.last.replace(alias) {
+                idle::released(&old);
+            }
             self.seen.set_pages(pages(ranges));
             aliased.own.take()
         };
@@ -532,6 +541,9 @@ impl Drop for Backing {
             && let Some(id) = self.id
         {
             DETACHED.lock().released(id);
+        }
+        if let Some(alias) = &self.alias.lock().last {
+            idle::released(alias);
         }
         let own = self.alias.lock().own.take();
         if let Some(own) = own {
@@ -835,6 +847,9 @@ pub(crate) struct Alias {
     /// Whether the runtime imports it through a writable twin of read-only pages, as its last
     /// import found ([`Alias::into_runtime`]).
     kept: AtomicBool,
+    /// Its class for the kernel mappings it holds: whether it is idle, and given back
+    /// ([`idle`]).
+    tag: Arc<idle::Tag>,
 }
 
 // SAFETY: an `Alias` is an address range this platform owns; nothing reads through it here, and
@@ -876,10 +891,21 @@ impl Alias {
     pub(crate) fn first(&self) -> NonNull<u8> {
         self.at
     }
+
+    /// Its class ([`idle`]).
+    pub(crate) fn tag(&self) -> &idle::Tag {
+        &self.tag
+    }
+
+    /// Its first byte and its length, as the kernel maps them.
+    pub(crate) fn span(&self) -> (u64, u64) {
+        (self.at.as_ptr().addr().to_u64(), self.length)
+    }
 }
 
 impl Drop for Alias {
     fn drop(&mut self) {
+        idle::dropped(self.span().0);
         let _ = OsVm::new().deallocate(HostPtr::from_ptr(self.at.as_ptr()), self.length);
     }
 }
@@ -1110,6 +1136,7 @@ pub(crate) fn gather(
         at: NonNull::new(at.as_ptr::<u8>())?,
         length,
         kept: AtomicBool::new(false),
+        tag: idle::made(at.addr().to_u64(), length),
     };
     for run in runs {
         let source = HostPtr::from_addr(usize::try_from(run.source).ok()?);
@@ -1131,6 +1158,7 @@ pub(crate) fn gather(
             refused_by_host(sel, "an alias's read-only protection", length, kr);
         }
     }
+    idle::tick();
     Some(alias)
 }
 
@@ -1670,6 +1698,74 @@ mod tests {
         let vm = OsVm::new();
         assert!(vm.deallocate(guest, 2 * PAGE).is_success());
         assert!(vm.deallocate(made_over, 2 * PAGE).is_success());
+    }
+
+    /// The alias a detached object keeps for its `contents` is given back to the kernel once the
+    /// runtime lets go of its import, not before: its mappings go, its address stays and reads
+    /// the guest's bytes, and a replace gives the object a live alias again
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    fn a_detached_objects_alias_is_given_back_once_the_runtime_lets_go() {
+        use std::cell::RefCell;
+
+        crate::os::IDLE_TEST_ON.with(|on| on.set(true));
+        let guest = pages(4, 0x10);
+        // The pages in reverse order: a run, and a mapping, each.
+        let ranges: Vec<_> = (0..4)
+            .rev()
+            .map(|i| range(address(guest) + i * PAGE, PAGE))
+            .collect();
+        for i in 0..4 {
+            write(guest, i * PAGE, 0x20 + u8::try_from(i).unwrap());
+        }
+        let [id] = ids();
+        let backing = Backing::new(false, id);
+        let made_over = pages(4, 0x11);
+        let made_at = NonNull::new(made_over.as_ptr::<u8>()).unwrap();
+        backing.made_over_own(Own::new(made_at, Arc::default()));
+        backing.detach(|| Ok(true));
+        // The runtime holds the import of the replace's alias, in the keep-alive it is given.
+        let runtime = RefCell::new(None);
+        let rebind = |_: NonNull<u8>, keep: rt::KeepAlive| {
+            *runtime.borrow_mut() = Some(keep);
+            Ok(())
+        };
+        assert_eq!(
+            backing.replace(&ranges, false, 4 * PAGE, 4 * PAGE, rebind),
+            Ok(true)
+        );
+        let alias = backing.alias.lock().last.clone().unwrap();
+        let (first, length) = alias.span();
+        let table = || crate::os::view_mappings(&[(first, first + length)])[0];
+        assert_eq!(table(), 4, "attached: a mapping a page");
+        assert_eq!(alias.tag().class(), idle::Class::Live);
+        drop(alias);
+        backing.detach(|| Ok(true));
+        let kept = backing.kept_contents().unwrap();
+        assert_eq!(read(kept, 0), 0x23, "the guest's last page first");
+        // The runtime still holds the import: nothing is given back, whatever the room.
+        assert!(!idle::give_back_for(|| false));
+        assert_eq!(table(), 4, "held by the runtime");
+        runtime.borrow_mut().take();
+        idle::give_back_for(|| false);
+        assert_eq!(table(), 0, "given back: the mappings are credited");
+        assert_eq!(read(kept, 0), 0x23, "the same bytes at the same address");
+        assert_eq!(read(kept, 3 * PAGE), 0x20);
+        assert_eq!(backing.kept_contents(), Some(kept));
+        // A replace gives the object a live alias, and drops the lazy one.
+        assert_eq!(
+            backing.replace(&ranges, false, 4 * PAGE, 4 * PAGE, |_, keep| {
+                drop(keep);
+                Ok(())
+            }),
+            Ok(true)
+        );
+        assert_eq!(backing.kept_contents(), None);
+        drop(backing);
+        crate::os::IDLE_TEST_ON.with(|on| on.set(false));
+        let vm = OsVm::new();
+        assert!(vm.deallocate(guest, 4 * PAGE).is_success());
+        assert!(vm.deallocate(made_over, 4 * PAGE).is_success());
     }
 
     /// A no-copy buffer never replaced runs its deallocator as it goes where a detach held the
