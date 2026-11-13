@@ -301,6 +301,14 @@ impl Drop for UnmapHold {
     }
 }
 
+/// Whether a live hold meets a page of `first..end` (whole pages): a runtime import of host
+/// memory there is made or being made, so that a view over them may not be given back to the
+/// kernel until the hold goes (`crate::os`'s lazy surface views).
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub(crate) fn held_over(first: u64, end: u64) -> bool {
+    HOLDS.lock().meets(&(first..end))
+}
+
 /// Whether an unmap of a page of the `length` bytes at `at` waits for a hold, for tests.
 #[cfg(test)]
 pub(crate) fn unmap_waits(at: HostPtr, length: u64) -> bool {

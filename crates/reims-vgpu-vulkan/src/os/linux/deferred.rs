@@ -192,6 +192,7 @@ static FAULTS: AtomicU64 = AtomicU64::new(0);
 static VIEWS_MADE: AtomicU64 = AtomicU64::new(0);
 static PINNED: AtomicU64 = AtomicU64::new(0);
 static LAZY_MADE: AtomicU64 = AtomicU64::new(0);
+static PARKED: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(test)]
 thread_local! {
@@ -229,6 +230,17 @@ fn max_pages() -> u64 {
 /// remaps into record their runs unmapped ([`remap`]). `Err` where the host gives no address
 /// space.
 pub(crate) fn allocate(length: u64) -> Result<HostAddr, KernReturn> {
+    allocate_view(length, false)
+}
+
+/// [`allocate`] for a lazy view from the start (module docs, "Lazy views"): its windows count
+/// against the budget of mappings, and it can be given back again after the runtime pinned it
+/// ([`repark`]). For an IOSurface's view over the guest's pages (`super::surface`).
+pub(crate) fn allocate_lazy(length: u64) -> Result<HostAddr, KernReturn> {
+    allocate_view(length, true)
+}
+
+fn allocate_view(length: u64, lazy: bool) -> Result<HostAddr, KernReturn> {
     install_handler();
     // No access, as a dropped window is mapped again (`State::drop_window`), so the kernel joins
     // the two.
@@ -253,7 +265,7 @@ pub(crate) fn allocate(length: u64) -> Result<HostAddr, KernReturn> {
         View {
             end: at + length,
             pinned: false,
-            lazy: false,
+            lazy,
         },
     );
     LOW.fetch_min(at, Ordering::AcqRel);
@@ -338,6 +350,87 @@ pub(crate) fn make_lazy(first: u64, length: u64) -> bool {
     files::set_deferred(first, length, true);
     LAZY_MADE.fetch_add(1, Ordering::Relaxed);
     true
+}
+
+/// What [`repark`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Reparked {
+    /// The view's mappings went back to its one reservation.
+    Given,
+    /// It held none: nothing to give back.
+    Nothing,
+    /// The caller's `idle` said no, or the kernel refused the reservation: still as it was.
+    Busy,
+    /// No lazy view of exactly that range.
+    NotLazy,
+}
+
+/// Gives the lazy view of `length` bytes from `first` back to its one reservation with no access
+/// again, where it holds mappings: the whole-view map a pin made ([`pin`], for a runtime import
+/// of its pointer) or the windows the CPU's touches mapped. Its runs stay deferred in the table,
+/// so a touch maps a window of them again and a later pin maps the whole view again. `idle` is
+/// asked under [`STATE`]'s lock, which a pin takes to map the view and the fault handler takes to
+/// map a window: an import that pinned the view before has its hold on its pages taken before it
+/// pinned, so `idle` sees it, and one that pins after finds the view parked and maps it again.
+///
+/// What it needs of the caller is [`make_lazy`]'s: nothing of the library's reaches the view's
+/// pages by any way but the CPU's pointer, no import of them is live (`idle` says so) and no
+/// thread has the view's address in a system call.
+pub(crate) fn repark(first: u64, length: u64, idle: impl FnOnce() -> bool) -> Reparked {
+    let mut state = STATE.lock();
+    let Some(end) = first.checked_add(length) else {
+        return Reparked::NotLazy;
+    };
+    let Some(view) = state.views.get(&first) else {
+        return Reparked::NotLazy;
+    };
+    if !view.lazy || view.end != end {
+        return Reparked::NotLazy;
+    }
+    let pinned = view.pinned;
+    let windowed = state
+        .windows
+        .range(..end)
+        .next_back()
+        .is_some_and(|(&at, &len)| at + len > first);
+    if !pinned && !windowed {
+        return Reparked::Nothing;
+    }
+    if !idle() {
+        return Reparked::Busy;
+    }
+    if !pinned {
+        state.unmap_windows(first, end);
+        PARKED.fetch_add(1, Ordering::Relaxed);
+        return Reparked::Given;
+    }
+    // SAFETY: the view's own range, which the caller says nothing imports; the reservation
+    // replaces its mappings at the same address (as `make_lazy` does) and the fault handler maps
+    // them again from the table.
+    let reserved = unsafe {
+        libc::mmap(
+            vm::ptr(first),
+            length.to_usize(),
+            libc::PROT_NONE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_NORESERVE | libc::MAP_FIXED,
+            -1,
+            0,
+        )
+    };
+    if reserved == libc::MAP_FAILED {
+        log::error!(
+            target: "reims_vgpu_vulkan::os",
+            "a pinned view of {length:#x} bytes at {first:#x} stays mapped, not given back: {}",
+            std::io::Error::last_os_error()
+        );
+        return Reparked::Busy;
+    }
+    files::set_deferred(first, length, true);
+    if let Some(view) = state.views.get_mut(&first) {
+        view.pinned = false;
+    }
+    PARKED.fetch_add(1, Ordering::Relaxed);
+    Reparked::Given
 }
 
 /// The lazy views, and the windows and pages mapped of all deferred views, for the views census
@@ -469,7 +562,8 @@ pub(crate) fn release(first: u64, length: u64) {
 
 /// Maps the whole deferred view holding `length` bytes from `first` for good (module docs), its
 /// windows included: `true` where it is mapped now, `false` where a map was refused.
-fn pin(first: u64, length: u64) -> bool {
+pub(super) fn pin(first: u64, length: u64) -> bool {
+    make_room_for_pin(first, length);
     let mut state = STATE.lock();
     let end = first.saturating_add(length);
     let Some(view_first) = state.view_holding(first, end) else {
@@ -501,6 +595,34 @@ fn pin(first: u64, length: u64) -> bool {
         view_end - view_first
     );
     true
+}
+
+/// Before a lazy view is pinned: where its mappings would pass the budget, idle views are
+/// given back for them, as an eager view's are ([`budget::admit`]). `pin` charges the budget
+/// under [`STATE`]'s lock, where giving views back (which takes it) cannot run, so it runs here,
+/// before the lock; the runtime calls the source with no lock of its own held.
+fn make_room_for_pin(first: u64, length: u64) {
+    let (view_first, view_end) = {
+        let state = STATE.lock();
+        let end = first.saturating_add(length);
+        let Some(view_first) = state.view_holding(first, end) else {
+            return;
+        };
+        let Some(view) = state.views.get(&view_first) else {
+            return;
+        };
+        if view.pinned || !view.lazy {
+            return;
+        }
+        (view_first, view.end)
+    };
+    let Some(pieces) = files::pieces(view_first, view_end - view_first) else {
+        return;
+    };
+    let adding = vm::mappings_added(&pieces);
+    if !budget::fits(adding) {
+        crate::gpu::idle::give_back_for(|| budget::fits(adding));
+    }
 }
 
 /// Maps `length` bytes from `first`, a stretch of a deferred view, from the table's files at
@@ -835,6 +957,60 @@ mod tests {
         assert_eq!(read(at + 2 * window * p), (pages - 1 - 2 * window) as u8);
         budget::set_test_limit(None);
         assert_eq!(read(at), 0xa5);
+        assert!(v.deallocate(HostAddr::from_addr(at.to_usize()), pages * p).is_success());
+        assert!(!holds(at, 1));
+        assert!(v.deallocate(HostAddr::from_addr(src.to_usize()), pages * p).is_success());
+    }
+
+    /// A lazy view the runtime pinned goes back to its one reservation where nothing imports it
+    /// and stays where something does; a touch then maps the same pages again, and so does a
+    /// later pin. A view that is not lazy, or another range, is none of its business
+    #[test]
+    fn a_pinned_lazy_view_is_given_back_when_idle() {
+        let v = super::super::LinuxVm::new();
+        let p = vm::page_size();
+        let pages = 2 * WINDOW / p;
+        let src = vm::allocate_aliasable(pages * p).unwrap();
+        let src = src.addr().to_u64();
+        for i in 0..pages {
+            write(src + i * p, i as u8);
+        }
+        let at = allocate_lazy(pages * p).unwrap().addr().to_u64();
+        let end = at + pages * p;
+        // In reverse order: a run each.
+        for i in 0..pages {
+            let from = HostAddr::from_addr((src + (pages - 1 - i) * p).to_usize());
+            v.remap_shared_overwrite(HostAddr::from_addr((at + i * p).to_usize()), from, p)
+                .unwrap();
+        }
+        assert_eq!(repark(at, pages * p, || true), Reparked::Nothing, "nothing mapped yet");
+        assert_eq!(repark(at, p, || true), Reparked::NotLazy, "not the view's range");
+        // The runtime's pointer import: the whole view, a mapping a run.
+        assert!(pin(at, p));
+        assert_eq!(files::mappings_between(at, end), pages);
+        assert_eq!(read(at + p), (pages - 2) as u8);
+        assert_eq!(repark(at, pages * p, || false), Reparked::Busy, "imported");
+        assert_eq!(files::mappings_between(at, end), pages, "still mapped");
+        assert_eq!(repark(at, pages * p, || true), Reparked::Given);
+        assert_eq!(files::mappings_between(at, end), 0, "credited");
+        assert_eq!(vm::tests::kernel_mappings(at, end), 1, "the reservation");
+        // The CPU's touch maps a window of the same pages, both ways.
+        assert_eq!(read(at + p), (pages - 2) as u8);
+        write(at, 0xa5);
+        assert_eq!(read(src + (pages - 1) * p), 0xa5, "the guest's page");
+        assert_eq!(files::mappings_between(at, end), WINDOW / p, "a window");
+        // Windows go back too.
+        assert_eq!(repark(at, pages * p, || true), Reparked::Given);
+        assert_eq!(files::mappings_between(at, end), 0);
+        // A pin after it maps the view again.
+        assert!(pin(at, p));
+        assert_eq!(files::mappings_between(at, end), pages);
+        assert_eq!(read(at), 0xa5);
+        assert_eq!(repark(at, pages * p, || true), Reparked::Given);
+        // A view that is not lazy stays as it is.
+        let plain = allocate(2 * p).unwrap().addr().to_u64();
+        assert_eq!(repark(plain, 2 * p, || true), Reparked::NotLazy);
+        assert!(v.deallocate(HostAddr::from_addr(plain.to_usize()), 2 * p).is_success());
         assert!(v.deallocate(HostAddr::from_addr(at.to_usize()), pages * p).is_success());
         assert!(!holds(at, 1));
         assert!(v.deallocate(HostAddr::from_addr(src.to_usize()), pages * p).is_success());

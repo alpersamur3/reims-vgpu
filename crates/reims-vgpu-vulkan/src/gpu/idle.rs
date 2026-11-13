@@ -34,6 +34,11 @@
 //!   `crate::os`'s `idle`). It happens a few seconds after the detach once the runtime let go
 //!   ([`tick`]), and at once for the oldest first where the budget would end the process
 //!   ([`give_back_for`]).
+//! - **IOSurface views** (`REIMS_VGPU_LAZY_MAPPINGS=surfaces`) are given back by the same
+//!   passes ([`crate::os::give_back_surface_views`]): a lazy surface view whose runtime imports
+//!   were all freed. The census names them by "lazy surfaces", their count and how many times
+//!   one was given back, and the mappings of the ones mapped now remain in "other by maker"
+//!   as `surfaces`.
 //! - **The census** logs one line every 30 s (at the first view made or object detached after
 //!   them) with the budget's count and the mappings of each class, so that a device's log says
 //!   which class holds them as the count grows. The line starts with [`CENSUS`].
@@ -297,6 +302,10 @@ mod real {
                 given += 1;
             }
         }
+        // The lazy IOSurface views whose imports the runtime freed (`crate::os`'s `surface`).
+        if !enough() {
+            given += os::give_back_surface_views(older_than, &enough);
+        }
         GIVEN_BACK.fetch_add(given, Ordering::Relaxed);
         given
     }
@@ -410,7 +419,7 @@ mod real {
                 "{CENSUS} held {} of budget {} (vm.max_map_count {}); aliases {} holding {} \
                  [live {}/{}, kept for contents {}/{}, runtime only {}/{}, lazy {}/{}]; lazy \
                  windows {} of {} pages; kept covers {}; twins {}; stand-ins {}; other table \
-                 runs {}; given back {} ({} under pressure); other by maker [{}]",
+                 runs {}; lazy surfaces {} ({} given back); given back {} ({} under pressure);                  other by maker [{}]",
                 counts.held,
                 counts.budget,
                 counts.limit,
@@ -430,6 +439,8 @@ mod real {
                 counts.twins,
                 counts.stand_ins,
                 other,
+                counts.lazy_surfaces,
+                counts.surfaces_given,
                 self.given_back,
                 self.under_pressure,
                 (self.makers.iter())
@@ -490,6 +501,8 @@ mod real {
                     lazy_views: 1,
                     windows: 3,
                     pages: 96,
+                    lazy_surfaces: 12,
+                    surfaces_given: 4,
                 }),
                 covers: 7,
                 given_back: 5,
@@ -516,6 +529,7 @@ mod real {
                 "twins 30",
                 "stand-ins 4",
                 "other table runs 900",
+                "lazy surfaces 12 (4 given back)",
                 "given back 5 (2 under pressure)",
                 "other by maker [buffers over task pages 800, object lists 100]",
             ] {

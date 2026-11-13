@@ -27,6 +27,20 @@
 //!   reference: the retain count stays the objects'. Measured on an Iris Xe (Mesa 26.2.4's ANV,
 //!   i915): ANV puts every live import in each execbuffer, and one whose pages are unmapped
 //!   fails it with `EFAULT`, which ANV answers as the device lost.
+//! - **Lazy views** (`REIMS_VGPU_LAZY_MAPPINGS=surfaces`, [`super::idle::lazy_surfaces`], where
+//!   deferred views are off, the old path). The view of several ranges costs a kernel mapping
+//!   for each run of scattered pages for as long as the guest keeps the surface, which on the
+//!   phone is most of the mappings the process holds. A lazy view is made as a reservation with
+//!   its runs deferred in the table ([`super::deferred::allocate_lazy`]), and has mappings only
+//!   where something uses its bytes: the CPU's touch maps a window of it, and a runtime import
+//!   of its pointer (a texture or buffer over the surface, [`surface_memory_hold`]) pins it, the
+//!   whole view mapped, for as long as the import lives. When the last hold of the surface's
+//!   memory goes, the view is queued, and once the runtime has let go ([`give_back_idle`], a few
+//!   seconds on, and at once where the budget of mappings has no room) it is a reservation
+//!   again ([`super::deferred::repark`]), which a hold's next import pins again. The memory
+//!   itself is the same pages, so what the guest wrote is what a later map shows. A read-only
+//!   view stays eager: the runtime refuses read-only memory as host memory, and a twin of it
+//!   (`super::import`) is made of eager mappings.
 //! - **What it answers** is the spec's: its planes, rows and sizes, its allocation size exactly
 //!   as given. It holds no values (`IOSurfaceCopyValue`): nothing in the process sets one.
 //!   `lock` and `unlock` do nothing.
@@ -54,8 +68,11 @@
 //! byte per element and rows of its width rounded up to 128 bytes (measured on the M3 Max:
 //! widths 16, 17, 32 and 65535).
 
+use std::collections::VecDeque;
 use std::ptr::NonNull;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Weak};
+use std::time::{Duration, Instant};
 
 use reims_vgpu_core::host::{HostPtr, PhysicalMemoryRange};
 use reims_vgpu_core::num::{ToU64, ToUsize};
@@ -66,6 +83,7 @@ use reims_vgpu_core::platform::os::vm::{HostVm as _, KernReturn, VmProt};
 use reims_vgpu_core::platform::{Handle, ObjId};
 use reims_vgpu_core::sync::Mutex;
 
+use super::deferred::{self, Reparked};
 use super::vm::{LinuxVm, OwnMemory};
 use crate::os::{MadeOver, READ_ONLY_DIRECTION, page_runs};
 use crate::platform::VulkanPlatform;
@@ -126,11 +144,57 @@ struct Memory {
     own: Option<OwnMemory>,
     /// The view of the guest's pages it made, its first byte and length.
     view: Option<(u64, u64)>,
+    /// Set where the view is a lazy one (module docs): what holds it.
+    lazy: Option<Mutex<LazyState>>,
+}
+
+/// What holds a lazy view: the holds on the surface's memory that are live
+/// ([`surface_memory_hold`]), whether the view is in the queue to be given back, and when its
+/// last hold went.
+#[derive(Debug)]
+struct LazyState {
+    holds: usize,
+    queued: bool,
+    since: Instant,
+}
+
+/// The lazy views alive, and how many times one was given back, for the views census.
+static LAZY_ALIVE: AtomicU64 = AtomicU64::new(0);
+static GIVEN_BACK: AtomicU64 = AtomicU64::new(0);
+
+/// The lazy views whose last hold went and are not given back yet, oldest first.
+static QUEUE: Mutex<VecDeque<Weak<Memory>>> = Mutex::new(VecDeque::new());
+
+/// The lazy surface views alive.
+pub(super) fn lazy_alive() -> u64 {
+    LAZY_ALIVE.load(Ordering::Relaxed)
+}
+
+/// The times a lazy surface view was given back.
+pub(super) fn given_back() -> u64 {
+    GIVEN_BACK.load(Ordering::Relaxed)
+}
+
+impl Memory {
+    /// The state of a lazy view, counted; none for a view that is not.
+    fn lazy_state(lazy: bool) -> Option<Mutex<LazyState>> {
+        lazy.then(|| {
+            LAZY_ALIVE.fetch_add(1, Ordering::Relaxed);
+            Mutex::new(LazyState {
+                holds: 0,
+                queued: false,
+                since: Instant::now(),
+            })
+        })
+    }
 }
 
 impl Drop for Memory {
     /// Frees the view the surface made, and its own memory.
     fn drop(&mut self) {
+        if self.lazy.is_some() {
+            LAZY_ALIVE.fetch_sub(1, Ordering::Relaxed);
+        }
         if let Some((first, length)) = self.view {
             let _ = LinuxVm::new().deallocate(HostPtr::from_addr(first.to_usize()), length);
         }
@@ -141,7 +205,9 @@ impl Drop for Memory {
 /// A hold on the memory `surface` mapped, which keeps it mapped while it lives, the surface gone
 /// or not, and counts no reference of the surface; for one over a single range of the guest's
 /// pages, which maps nothing, an unmap hold on that range, which defers nothing for a range of
-/// the host's own RAM, the only one core makes such a surface over (module docs).
+/// the host's own RAM, the only one core makes such a surface over (module docs). For a lazy
+/// view it is also what the view is mapped for: the runtime imports its pointer while the hold
+/// lives, and the view is not given back until the last hold has gone.
 pub(crate) fn surface_memory_hold(surface: &LinuxSurface) -> impl Send + 'static {
     let data = surface.data();
     let memory = &data.memory;
@@ -153,7 +219,109 @@ pub(crate) fn surface_memory_hold(surface: &LinuxSurface) -> impl Send + 'static
         })
         .flatten()
         .map(|first| crate::remap::UnmapHold::new(first, data.alloc_size));
-    (Arc::clone(memory), cores_unmap)
+    // Counted under the state's lock, which a give-back holds while it checks and parks the
+    // view: a hold taken meanwhile waits, and its import pins the view again.
+    if let Some(lazy) = &memory.lazy {
+        lazy.lock().holds += 1;
+    }
+    SurfaceHold {
+        memory: Arc::clone(memory),
+        _cores_unmap: cores_unmap,
+    }
+}
+
+/// A hold on a surface's memory ([`surface_memory_hold`]).
+#[derive(Debug)]
+struct SurfaceHold {
+    memory: Arc<Memory>,
+    _cores_unmap: Option<crate::remap::UnmapHold>,
+}
+
+impl Drop for SurfaceHold {
+    /// Counts the hold down; the last one of a lazy view queues it to be given back. Only
+    /// counts and queues: it may run on the runtime's thread in the middle of its own work.
+    fn drop(&mut self) {
+        let Some(lazy) = &self.memory.lazy else {
+            return;
+        };
+        let mut state = lazy.lock();
+        state.holds = state.holds.saturating_sub(1);
+        let mut push = false;
+        if state.holds == 0 {
+            state.since = Instant::now();
+            if !state.queued {
+                state.queued = true;
+                push = true;
+            }
+        }
+        // The queue's lock is never taken under the state's (the pass takes them the other way).
+        drop(state);
+        if push {
+            QUEUE.lock().push_back(Arc::downgrade(&self.memory));
+        }
+    }
+}
+
+/// Gives back the lazy surface views whose holds are gone, those for `older_than` at least (any,
+/// with `None`), until `enough`: how many (module docs). A view whose pages an import of the
+/// runtime's still covers (an unmap hold of a no-copy buffer over them, which takes its hold
+/// before it imports) is left for a later pass.
+pub(super) fn give_back_idle(older_than: Option<Duration>, enough: &dyn Fn() -> bool) -> u64 {
+    let queued: Vec<Arc<Memory>> = {
+        let mut queue = QUEUE.lock();
+        queue.retain(|memory| {
+            memory
+                .upgrade()
+                .is_some_and(|m| m.lazy.as_ref().is_some_and(|l| l.lock().queued))
+        });
+        queue.iter().filter_map(Weak::upgrade).collect()
+    };
+    let mut given = 0;
+    for memory in &queued {
+        if enough() {
+            break;
+        }
+        if park(memory, older_than) == Parked::Given {
+            given += 1;
+        }
+    }
+    GIVEN_BACK.fetch_add(given, Ordering::Relaxed);
+    given
+}
+
+/// What [`park`] did.
+#[derive(Debug, PartialEq, Eq)]
+enum Parked {
+    /// Its mappings went back to the reservation.
+    Given,
+    /// It had none: out of the queue.
+    Done,
+    /// Held, too recent or covered by an import: stays queued.
+    Wait,
+}
+
+/// Parks `memory`'s lazy view if nothing holds it (module docs). The state's lock is held across
+/// the check and the park, so that a hold taken meanwhile waits for it.
+fn park(memory: &Memory, older_than: Option<Duration>) -> Parked {
+    let (Some(lazy), Some((first, length))) = (&memory.lazy, memory.view) else {
+        return Parked::Done;
+    };
+    let mut state = lazy.lock();
+    if state.holds > 0 || older_than.is_some_and(|age| state.since.elapsed() < age) {
+        return Parked::Wait;
+    }
+    let end = first.saturating_add(length);
+    match deferred::repark(first, length, || !crate::remap::held_over(first, end)) {
+        Reparked::Given => {
+            state.queued = false;
+            Parked::Given
+        }
+        Reparked::Nothing | Reparked::NotLazy => {
+            state.queued = false;
+            Parked::Done
+        }
+        Reparked::Busy => Parked::Wait,
+    }
 }
 
 impl LinuxSurface {
@@ -386,9 +554,9 @@ fn checked_ranges(ranges: &[PhysicalMemoryRange], alloc_size: u64) -> Option<()>
 }
 
 /// A view of the first `length` bytes of `ranges`, in their order, read-only when `read_only`:
-/// its first byte, or `None` where a range has no file behind it or the host gives no address
-/// space, nothing left mapped.
-fn view(ranges: &[PhysicalMemoryRange], length: u64, read_only: bool) -> Option<u64> {
+/// its first byte and whether it is a lazy view (module docs), or `None` where a range has no
+/// file behind it or the host gives no address space, nothing left mapped.
+fn view(ranges: &[PhysicalMemoryRange], length: u64, read_only: bool) -> Option<(u64, bool)> {
     let vm = LinuxVm::new();
     // Wholly of the guest's RAM: a deferred view (`super::deferred`).
     let mut spans: Vec<(u64, u64)> = Vec::new();
@@ -401,9 +569,24 @@ fn view(ranges: &[PhysicalMemoryRange], length: u64, read_only: bool) -> Option<
         spans.push((r.physical_address, now));
         left -= now;
     }
-    let at = match super::allocate_deferred(&spans, length) {
-        Some(at) => at,
-        None => vm.allocate_anywhere(length).ok()?,
+    // A lazy view (module docs) where named, not read-only, and wholly of the guest's RAM as a
+    // deferred view is; its runs are recorded unmapped by the remaps below.
+    let lazy_at = || {
+        let eligible = !read_only
+            && super::idle::lazy_surfaces()
+            && spans
+                .iter()
+                .all(|&(first, len)| deferred::guest_backed(first, len));
+        eligible
+            .then(|| deferred::allocate_lazy(length).ok())
+            .flatten()
+    };
+    let (at, lazy) = match super::allocate_deferred(&spans, length) {
+        Some(at) => (at, false),
+        None => match lazy_at() {
+            Some(at) => (at, true),
+            None => (vm.allocate_anywhere(length).ok()?, false),
+        },
     };
     let mut offset = 0u64;
     for r in ranges {
@@ -432,7 +615,11 @@ fn view(ranges: &[PhysicalMemoryRange], length: u64, read_only: bool) -> Option<
         let _ = vm.deallocate(at, length);
         return None;
     }
-    Some(at.addr().to_u64())
+    if lazy {
+        // As the aliases do: the pass for views nothing holds any more runs where views are made.
+        crate::gpu::idle::tick();
+    }
+    Some((at.addr().to_u64(), lazy))
 }
 
 /// IOSurface's creation on Linux (module docs).
@@ -473,6 +660,7 @@ impl IoSurfaces<VulkanPlatform> for LinuxSurfaces {
             offset: spec.offset,
             ..MadeOver::default()
         };
+        let mut lazy = false;
         let (base, own, view_made) = match &spec.client_address_ranges {
             Some(ranges) => {
                 if protection != 0 {
@@ -488,7 +676,8 @@ impl IoSurfaces<VulkanPlatform> for LinuxSurfaces {
                     [one] => (one.physical_address, None, None),
                     _ => {
                         let length = spec.alloc_size.checked_next_multiple_of(page_size())?;
-                        let at = view(ranges, length, made.gpu_read_only)?;
+                        let (at, is_lazy) = view(ranges, length, made.gpu_read_only)?;
+                        lazy = is_lazy;
                         (at, None, Some((at, length)))
                     }
                 }
@@ -512,6 +701,7 @@ impl IoSurfaces<VulkanPlatform> for LinuxSurfaces {
             memory: Arc::new(Memory {
                 own,
                 view: view_made,
+                lazy: Memory::lazy_state(lazy),
             }),
             made: Mutex::new(made),
         }))
@@ -557,6 +747,7 @@ impl IoSurfaces<VulkanPlatform> for LinuxSurfaces {
             memory: Arc::new(Memory {
                 own: Some(own),
                 view: None,
+                lazy: None,
             }),
             made: Mutex::new(MadeOver::default()),
         }))
@@ -704,6 +895,102 @@ mod tests {
             assert!(!mapped(base), "{spec:?}");
         }
         free(at, 2 * page);
+    }
+
+    /// A lazy surface view (`surfaces` named) has no mapping until something uses its bytes: the
+    /// runtime's import (a hold) maps it whole, a hold's last drop and the pass give it back once
+    /// no unmap hold of a no-copy import covers it, and a later hold maps it again, the guest's
+    /// pages both ways
+    #[test]
+    fn a_lazy_view_is_mapped_while_held_and_given_back_after() {
+        use super::super::deferred::pin;
+        use super::super::files::{self, Backing};
+        use super::super::vm;
+
+        super::super::idle::TEST_SURFACES.with(|on| on.set(true));
+        const GUEST: u64 = 4 << 20;
+        let page = page_size();
+        let fd = vm::memfd(GUEST);
+        let backing = Backing {
+            fd: Arc::clone(&fd),
+            offset: 0,
+        };
+        let guest = vm::file(None, GUEST, &backing, libc::PROT_READ | libc::PROT_WRITE).unwrap();
+        let _lease = files::lease_guest_memory([crate::os::GuestRamFile {
+            host: guest,
+            length: GUEST,
+            fd,
+            offset: 0,
+        }]);
+        // Four pages with a page between each, so that each is a run, in reverse order.
+        let at = |i: u64| guest + 2 * i * page;
+        for i in 0..4 {
+            // SAFETY: the guest's memory this test just mapped, writable.
+            unsafe {
+                std::ptr::write_bytes(
+                    std::ptr::with_exposed_provenance_mut::<u8>(at(i).to_usize()),
+                    u8::try_from(i).unwrap() + 1,
+                    page.to_usize(),
+                )
+            };
+        }
+        let ranges: Vec<_> = (0..4)
+            .rev()
+            .map(|i| PhysicalMemoryRange {
+                physical_address: at(i),
+                physical_length: page,
+            })
+            .collect();
+        let spec = SurfaceSpec {
+            alloc_size: 4 * page,
+            client_address_ranges: Some(ranges),
+            ..host_only()
+        };
+        let s = LinuxSurfaces::new().create(&spec).unwrap();
+        let memory = Arc::clone(&s.data().memory);
+        assert!(memory.lazy.is_some(), "a lazy view");
+        let (view, length) = mapped_range(&s).unwrap();
+        let end = view + length;
+        assert_eq!(files::mappings_between(view, end), 0, "no mapping until used");
+        assert_eq!(vm::tests::kernel_mappings(view, end), 1, "the reservation");
+        // The CPU's touch maps its window: the same pages.
+        assert_eq!([read(view), read(view + 3 * page)], [4, 1]);
+        // The runtime's import: a hold, and the pin the import asks for.
+        let hold = surface_memory_hold(&s);
+        assert!(pin(view, 1));
+        assert_eq!(files::mappings_between(view, end), 4, "a mapping a run");
+        assert_eq!(park(&memory, None), Parked::Wait, "held");
+        assert_eq!(files::mappings_between(view, end), 4);
+        drop(hold);
+        assert_eq!(
+            park(&memory, Some(Duration::from_secs(3600))),
+            Parked::Wait,
+            "too soon"
+        );
+        // A no-copy buffer over its pages: its unmap hold comes before its import.
+        let covered = NonNull::new(std::ptr::with_exposed_provenance_mut::<u8>(view.to_usize()));
+        let covering = crate::remap::UnmapHold::new(covered.unwrap(), length);
+        assert_eq!(park(&memory, None), Parked::Wait, "covered by an import");
+        assert_eq!(files::mappings_between(view, end), 4);
+        drop(covering);
+        assert_eq!(give_back_idle(None, &|| false), 1, "queued by the hold's drop");
+        assert_eq!(files::mappings_between(view, end), 0, "credited");
+        assert_eq!(vm::tests::kernel_mappings(view, end), 1, "the reservation");
+        assert!(given_back() >= 1);
+        // A later hold pins it again, and a write through the pinned view is the guest's.
+        let hold = surface_memory_hold(&s);
+        assert!(pin(view, 1));
+        assert_eq!(files::mappings_between(view, end), 4);
+        // SAFETY: the pinned view, writable.
+        unsafe { std::ptr::with_exposed_provenance_mut::<u8>(view.to_usize()).write_volatile(0x5a) };
+        assert_eq!(read(at(3)), 0x5a, "the guest's page");
+        drop(hold);
+        assert_eq!(give_back_idle(None, &|| false), 1, "queued again");
+        assert_eq!(files::mappings_between(view, end), 0);
+        // The view goes with the last object, parked or not.
+        drop((s, memory));
+        assert!(!mapped(HostPtr::from_addr(view.to_usize())));
+        super::super::idle::TEST_SURFACES.with(|on| on.set(false));
     }
 
     /// The layouts IOSurface refuses are refused (module docs), and those at its limits made

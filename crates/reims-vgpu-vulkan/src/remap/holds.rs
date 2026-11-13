@@ -40,7 +40,7 @@ impl Holds {
     }
 
     /// Whether a live hold meets `pages`.
-    fn meets(&self, pages: &Range<u64>) -> bool {
+    pub(super) fn meets(&self, pages: &Range<u64>) -> bool {
         let from = pages.start.saturating_sub(self.longest);
         (self.held.range((from, 0)..(pages.end, 0)))
             .any(|(&(first, _), &end)| first < pages.end && pages.start < end)

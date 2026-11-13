@@ -19,13 +19,21 @@
 //!   at one point on the phone, 6,000 when the screen closed. Those only the CPU uses are
 //!   deferred views ([`lazy_core`]); the pages the GPU runtime imports by pointer are not, unless
 //!   named.
+//! - **IOSurface views** over the guest's pages (`REIMS_VGPU_LAZY_MAPPINGS=surfaces`, off unless
+//!   named) are the largest class on the phone once the guest's screens are heavy: a surface
+//!   over several ranges has a view of its own, one mapping per run of scattered pages, for as
+//!   long as the guest keeps the surface (22,000 of 25,000 mappings at one sample). Such a view
+//!   is made lazy from the start ([`lazy_surfaces`], `super::surface`): a reservation, mapped in
+//!   whole only while a runtime import of its pointer lives (the pin of [`super::deferred`]) and
+//!   given back when the last hold of the import goes and the budget has no room or a few
+//!   seconds pass ([`give_back_surfaces`]).
 //! - **The census** (`crate::gpu::idle`) runs wherever deferred views are off, switch or no
 //!   switch: it is how to tell, on a device, which class of views holds the mappings as their
 //!   count grows.
 
 use reims_vgpu_core::num::ToU64 as _;
 
-use super::{budget, deferred, files};
+use super::{budget, deferred, files, surface};
 
 /// The mappings the library holds, and how, as the views census prints them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,6 +53,9 @@ pub(crate) struct Counts {
     pub(crate) lazy_views: u64,
     pub(crate) windows: u64,
     pub(crate) pages: u64,
+    /// The lazy IOSurface views alive, and the times one was given back.
+    pub(crate) lazy_surfaces: u64,
+    pub(crate) surfaces_given: u64,
 }
 
 impl Counts {
@@ -59,6 +70,8 @@ impl Counts {
         lazy_views: 0,
         windows: 0,
         pages: 0,
+        lazy_surfaces: 0,
+        surfaces_given: 0,
     };
 }
 
@@ -76,6 +89,8 @@ pub(crate) fn counts() -> Counts {
         lazy_views: lazy_views.to_u64(),
         windows: windows.to_u64(),
         pages,
+        lazy_surfaces: surface::lazy_alive(),
+        surfaces_given: surface::given_back(),
     }
 }
 
@@ -123,10 +138,10 @@ pub(crate) fn enabled() -> bool {
 /// or writes through a host address for the length of the command), `buffers` (the pages a
 /// no-copy buffer is made over, which the GPU runtime imports: off unless named, because on a
 /// driver that cannot gather the import maps the whole view for good, as an eager mapping
-/// would be, [`super::deferred::gather_source`]); `none` or `0` for none.
+/// would be, [`super::deferred::gather_source`]); `none` or `0` for none. `surfaces` is
+/// [`lazy_surfaces`]'s.
 pub(crate) fn lazy_core(maker: u8) -> bool {
     use reims_vgpu_core::memory::mapping::maker as m;
-    static NAMED: std::sync::OnceLock<(bool, bool, bool)> = std::sync::OnceLock::new();
     #[cfg(test)]
     if TEST_ON.with(std::cell::Cell::get) {
         return maker == m::OBJECT_LIST;
@@ -134,21 +149,70 @@ pub(crate) fn lazy_core(maker: u8) -> bool {
     if !enabled() {
         return false;
     }
-    let (lists, addresses, buffers) = *NAMED.get_or_init(|| {
-        match std::env::var("REIMS_VGPU_LAZY_MAPPINGS") {
-            Err(_) => (true, false, false),
-            Ok(named) => {
-                let has = |what: &str| named.split(',').any(|n| n.trim() == what);
-                (has("lists"), has("addresses"), has("buffers"))
-            }
-        }
-    });
+    let named = named();
     match maker {
-        m::OBJECT_LIST => lists,
-        m::TASK_ADDRESS => addresses,
-        m::BUFFER_OVER_PAGES => buffers,
+        m::OBJECT_LIST => named.lists,
+        m::TASK_ADDRESS => named.addresses,
+        m::BUFFER_OVER_PAGES => named.buffers,
         _ => false,
     }
+}
+
+/// The makers `REIMS_VGPU_LAZY_MAPPINGS` names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Named {
+    lists: bool,
+    addresses: bool,
+    buffers: bool,
+    surfaces: bool,
+}
+
+impl Named {
+    /// What no variable says: object lists alone.
+    const DEFAULT: Named = Named {
+        lists: true,
+        addresses: false,
+        buffers: false,
+        surfaces: false,
+    };
+
+    /// What `value` names; a name it does not know names nothing.
+    fn parse(value: &str) -> Named {
+        let has = |what: &str| value.split(',').any(|n| n.trim() == what);
+        Named {
+            lists: has("lists"),
+            addresses: has("addresses"),
+            buffers: has("buffers"),
+            surfaces: has("surfaces"),
+        }
+    }
+}
+
+/// The makers named, read once.
+fn named() -> Named {
+    static NAMED: std::sync::OnceLock<Named> = std::sync::OnceLock::new();
+    *NAMED.get_or_init(|| match std::env::var("REIMS_VGPU_LAZY_MAPPINGS") {
+        Err(_) => Named::DEFAULT,
+        Ok(value) => Named::parse(&value),
+    })
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A test's lazy surface views, on the thread that sets it, whatever the default.
+    pub(crate) static TEST_SURFACES: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether the view of an IOSurface over the guest's pages is a lazy view from the start
+/// (module docs): where idle views are on and `REIMS_VGPU_LAZY_MAPPINGS` names `surfaces`, so
+/// `lists,surfaces` for both. Off unless named, because its saving depends on how many
+/// surface-backed textures the guest keeps imported, which only the phone's census tells.
+pub(crate) fn lazy_surfaces() -> bool {
+    #[cfg(test)]
+    if TEST_SURFACES.with(std::cell::Cell::get) {
+        return true;
+    }
+    enabled() && named().surfaces
 }
 
 /// Whether the views census runs: where deferred views are off, which have a census of their own.
@@ -156,8 +220,47 @@ pub(crate) fn census_on() -> bool {
     !deferred::enabled()
 }
 
+/// Gives back the lazy surface views no import holds, those idle for `older_than` at least (any,
+/// with `None`), until `enough`: how many ([`surface::give_back_idle`]).
+pub(crate) fn give_back_surfaces(
+    older_than: Option<std::time::Duration>,
+    enough: &dyn Fn() -> bool,
+) -> u64 {
+    surface::give_back_idle(older_than, enough)
+}
+
 /// Gives the view of `length` bytes from `first` back to the kernel, its address kept
 /// ([`deferred::make_lazy`]): `true` where it holds one mapping, not its runs, from now on.
 pub(crate) fn give_back(first: u64, length: u64) -> bool {
     deferred::make_lazy(first, length)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Surface views are named like the other makers: off by default, by `surfaces` alone or
+    /// beside the rest, and not by a name that only looks like it
+    #[test]
+    fn surfaces_are_named_by_the_switch() {
+        assert!(!Named::DEFAULT.surfaces && Named::DEFAULT.lists);
+        let only = Named::parse("surfaces");
+        assert!(only.surfaces && !only.lists, "naming replaces the default");
+        let both = Named::parse("lists, surfaces");
+        assert!(both.surfaces && both.lists && !both.buffers && !both.addresses);
+        let all = Named::parse("lists,addresses,buffers,surfaces");
+        assert!(all.surfaces && all.lists && all.addresses && all.buffers);
+        for none in ["none", "0", "", "surface", "Surfaces", "surfaces2"] {
+            assert_eq!(
+                Named::parse(none),
+                Named {
+                    lists: false,
+                    addresses: false,
+                    buffers: false,
+                    surfaces: false
+                },
+                "{none:?}"
+            );
+        }
+    }
 }

@@ -713,12 +713,12 @@ mod tests {
         };
         // Four pages of one file in order: one mapping.
         for i in 0..4 {
-            t.record(at(i), at(i + 1), b(&f, i * page), rw, false);
+            t.record(at(i), at(i + 1), b(&f, i * page), rw, false, 0);
         }
         assert_eq!(t.mappings(), 1);
         // A page of the file out of order after them, then a page of another file: three.
-        t.record(at(4), at(5), b(&f, 0x9000), rw, false);
-        t.record(at(5), at(6), b(&g, 0xa000), rw, false);
+        t.record(at(4), at(5), b(&f, 0x9000), rw, false, 0);
+        t.record(at(5), at(6), b(&g, 0xa000), rw, false, 0);
         assert_eq!(t.mappings(), 3);
         // The second page read-only cuts the first mapping in three; read and write again, one.
         t.protect(at(1), at(2), libc::PROT_READ);
@@ -728,10 +728,10 @@ mod tests {
         // An unmap of the second page cuts it in two; the page mapped again as it was, one.
         t.forget(at(1), at(2));
         assert_eq!(t.mappings(), 4);
-        t.record(at(1), at(2), b(&f, page), rw, false);
+        t.record(at(1), at(2), b(&f, page), rw, false, 0);
         assert_eq!(t.mappings(), 3);
         // Another page of the file over the third: the first mapping in three.
-        t.record(at(2), at(3), b(&f, 0x20_000), rw, false);
+        t.record(at(2), at(3), b(&f, 0x20_000), rw, false, 0);
         assert_eq!(t.mappings(), 5);
         t.forget(base, at(6));
         assert_eq!((t.mappings(), t.joins, t.runs.len()), (0, 0, 0));
