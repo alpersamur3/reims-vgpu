@@ -19,8 +19,9 @@
 //!   at one point on the phone, 6,000 when the screen closed. Those only the CPU uses are
 //!   deferred views ([`lazy_core`]); the pages the GPU runtime imports by pointer are not, unless
 //!   named.
-//! - **IOSurface views** over the guest's pages (`REIMS_VGPU_LAZY_MAPPINGS=surfaces`, off unless
-//!   named) are the largest class on the phone once the guest's screens are heavy: a surface
+//! - **IOSurface views** over the guest's pages (`REIMS_VGPU_LAZY_MAPPINGS=surfaces`, on by default
+//!   where deferred views are off; `lists` alone turns them off) are the largest class on the
+//!   phone once the guest's screens are heavy: a surface
 //!   over several ranges has a view of its own, one mapping per run of scattered pages, for as
 //!   long as the guest keeps the surface (22,000 of 25,000 mappings at one sample). Such a view
 //!   is made lazy from the start ([`lazy_surfaces`], `super::surface`): a reservation, mapped in
@@ -168,12 +169,17 @@ struct Named {
 }
 
 impl Named {
-    /// What no variable says: object lists alone.
+    /// What no variable says: object lists and surface views. Every reader sits behind
+    /// [`enabled`], which is only on where deferred views are off (the compatibility path), so
+    /// where they are on the default stays the object lists alone: that path's census showed
+    /// the surface views running out of the kernel's mappings (33,128 held, fatal) while
+    /// `lists,surfaces` peaked at 5,731. A value of the variable names what it says and
+    /// nothing more, so `lists` alone turns the surface views off again.
     const DEFAULT: Named = Named {
         lists: true,
         addresses: false,
         buffers: false,
-        surfaces: false,
+        surfaces: true,
     };
 
     /// What `value` names; a name it does not know names nothing.
@@ -204,9 +210,9 @@ thread_local! {
 }
 
 /// Whether the view of an IOSurface over the guest's pages is a lazy view from the start
-/// (module docs): where idle views are on and `REIMS_VGPU_LAZY_MAPPINGS` names `surfaces`, so
-/// `lists,surfaces` for both. Off unless named, because its saving depends on how many
-/// surface-backed textures the guest keeps imported, which only the phone's census tells.
+/// (module docs): where idle views are on (so deferred views are off) and
+/// `REIMS_VGPU_LAZY_MAPPINGS` is unset or names `surfaces` (`lists,surfaces` for both). On by
+/// default there, [`Named::DEFAULT`]; `lists` alone turns it off.
 pub(crate) fn lazy_surfaces() -> bool {
     #[cfg(test)]
     if TEST_SURFACES.with(std::cell::Cell::get) {
@@ -239,11 +245,18 @@ pub(crate) fn give_back(first: u64, length: u64) -> bool {
 mod tests {
     use super::*;
 
-    /// Surface views are named like the other makers: off by default, by `surfaces` alone or
-    /// beside the rest, and not by a name that only looks like it
+    /// Surface views are named like the other makers: on by default (where idle views are on at
+    /// all), off by a value that does not name them, on by `surfaces` alone or beside the rest,
+    /// and not by a name that only looks like it
     #[test]
     fn surfaces_are_named_by_the_switch() {
-        assert!(!Named::DEFAULT.surfaces && Named::DEFAULT.lists);
+        assert!(Named::DEFAULT.surfaces && Named::DEFAULT.lists);
+        assert!(!Named::DEFAULT.addresses && !Named::DEFAULT.buffers);
+        let lists = Named::parse("lists");
+        assert!(
+            lists.lists && !lists.surfaces,
+            "an explicit value wins: lists alone is the old default"
+        );
         let only = Named::parse("surfaces");
         assert!(only.surfaces && !only.lists, "naming replaces the default");
         let both = Named::parse("lists, surfaces");
