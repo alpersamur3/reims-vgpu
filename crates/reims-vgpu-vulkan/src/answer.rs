@@ -1810,7 +1810,11 @@ fn dies(sel: &'static str, line: &str) -> ! {
 /// cannot map, which it maps where its modes are stated and the map sends each to one a constexpr
 /// sampler addresses, and refuses otherwise; and where it is a refusal of SIMD-group operations
 /// in a stage, the stage and the class ([`simd_stage`]); and where it is a refusal of host memory
-/// after the import's dma-buf source made none, why it made none ([`host_memory_refusal`]).
+/// after the import's dma-buf source made none, why it made none ([`host_memory_refusal`]); and
+/// where it is a refusal of host memory or of memory, the notes the runtime made of the checks that
+/// refused the import and, where `REIMS_VGPU_IMPORT_PROBE=1` probed the device, what the device
+/// takes of the shapes of host memory ([`import_refusal_tail`]). The line is the whole of what
+/// reaches a tester's crash report, so it names the reasons itself.
 pub fn refusal(e: &Error) -> String {
     use metal2vulkan_runtime::{MappedSampling, RuntimeGap};
     let path = match e {
@@ -1839,9 +1843,67 @@ pub fn refusal(e: &Error) -> String {
         })
         .or_else(|| simd_stage(e))
         .or_else(|| host_memory_refusal(e));
-    match named {
+    let mut line = match named {
         Some(named) => format!("the Vulkan runtime refused it: {e}; {named}"),
         None => format!("the Vulkan runtime refused it: {e}"),
+    };
+    let notes = host_import_notes(e);
+    if let Some(tail) = import_refusal_tail(&notes, crate::platform::import_probe_summary()) {
+        line.push_str(&tail);
+    }
+    line
+}
+
+/// The longest tail [`import_refusal_tail`] gives, in characters.
+const IMPORT_TAIL_LONGEST: usize = 1_800;
+
+/// The end of [`refusal`]'s line for a refused import of host memory: `; why: ` and the runtime's
+/// `notes` of the checks that refused it, oldest first, joined by ` | `, then, where the device was
+/// probed, `; import probe: ` and the probe's `summary` ([`crate::platform::import_probe_summary`]).
+/// `None` where there are no notes (a refusal that no check of the import made adds nothing, and
+/// the device's facts alone say nothing of it). One line: a line break in a note is a space, and
+/// what passes [`IMPORT_TAIL_LONGEST`] characters is cut where a character ends, ending in `...`,
+/// so a long note cannot bury the line's start in a crash report.
+fn import_refusal_tail(notes: &[String], probe: Option<&str>) -> Option<String> {
+    let notes: Vec<&str> = (notes.iter().map(String::as_str))
+        .filter(|note| !note.trim().is_empty())
+        .collect();
+    if notes.is_empty() {
+        return None;
+    }
+    let mut tail = format!("; why: {}", notes.join(" | "));
+    if let Some(probe) = probe.filter(|probe| !probe.trim().is_empty()) {
+        tail.push_str("; import probe: ");
+        tail.push_str(probe);
+    }
+    let mut tail: String = (tail.chars())
+        .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
+        .collect();
+    if tail.chars().count() > IMPORT_TAIL_LONGEST {
+        let cut = (tail.char_indices())
+            .nth(IMPORT_TAIL_LONGEST - 3)
+            .map_or(tail.len(), |(at, _)| at);
+        tail.truncate(cut);
+        tail.push_str("...");
+    }
+    Some(tail)
+}
+
+/// The runtime's notes of the checks that refused an import of host memory on this thread, taken,
+/// for a refusal that one of them decides: `HostMemory` unsupported, or no memory (the import's
+/// allocation and bind steps refuse so). Taken exactly once, here: the thread keeps its last few
+/// until someone does, and [`crate::os::host_memory`] drops those of an earlier import as it
+/// starts the next. Empty for any other refusal, whose line no import's note belongs to.
+fn host_import_notes(e: &Error) -> Vec<String> {
+    use metal2vulkan::error::Feature;
+    let import = match e {
+        Error::Unsupported(u) => u.feature == Feature::HostMemory,
+        Error::OutOfMemory(_) => true,
+        _ => false,
+    };
+    match import {
+        true => rt::take_host_import_notes(),
+        false => Vec::new(),
     }
 }
 
@@ -3282,5 +3344,169 @@ mod tests {
         let t = error_text(&Error::DeviceLost);
         assert_eq!(t.description, "the Vulkan device was lost");
         assert_eq!(t.to_string(), t.description);
+    }
+
+    fn notes(lines: &[&str]) -> Vec<String> {
+        lines.iter().map(|&line| line.to_owned()).collect()
+    }
+
+    /// A refused import with no note of the runtime's adds nothing to its line, whatever the probe
+    /// found: the device's facts alone say nothing of that refusal
+    #[test]
+    fn a_refused_import_without_notes_adds_nothing() {
+        assert_eq!(import_refusal_tail(&[], None), None);
+        assert_eq!(import_refusal_tail(&[], Some("P1 ok")), None);
+        assert_eq!(
+            import_refusal_tail(&notes(&["", "  "]), Some("P1 ok")),
+            None
+        );
+    }
+
+    /// The notes follow the line after a semicolon, oldest first, joined by a bar; the probe's
+    /// summary follows them, where the device was probed
+    #[test]
+    fn a_refused_import_names_its_notes_and_the_probe() {
+        let two = notes(&[
+            "host import refused at window: start 0x1000 end 0x35000",
+            "host import refused at binding: offset 0x0 length 0x34000",
+        ]);
+        assert_eq!(
+            import_refusal_tail(&two, None).as_deref(),
+            Some(
+                "; why: host import refused at window: start 0x1000 end 0x35000 | host import \
+                 refused at binding: offset 0x0 length 0x34000"
+            )
+        );
+        let one = notes(&["host import refused at alignment: pointer 0x2000"]);
+        assert_eq!(
+            import_refusal_tail(&one, Some("alignment=0x1000 types=[0:0x1]; P1 ok")).as_deref(),
+            Some(
+                "; why: host import refused at alignment: pointer 0x2000; import probe: \
+                 alignment=0x1000 types=[0:0x1]; P1 ok"
+            )
+        );
+        assert_eq!(
+            import_refusal_tail(&one, Some(" ")).as_deref(),
+            Some("; why: host import refused at alignment: pointer 0x2000"),
+            "an empty summary is none"
+        );
+    }
+
+    /// A line break in a note or the summary is a space: the death's line is one line
+    #[test]
+    fn a_refused_imports_tail_is_one_line() {
+        let broken = notes(&["host import refused at bind: a\nb\r\nc"]);
+        let tail = import_refusal_tail(&broken, Some("P1 ok\nP2 ok")).unwrap_or_default();
+        assert_eq!(
+            tail,
+            "; why: host import refused at bind: a b  c; import probe: P1 ok P2 ok"
+        );
+        assert!(!tail.contains(['\n', '\r']));
+    }
+
+    /// The tail is at most 1,800 characters, cut where a character ends and ending in `...`, its
+    /// start kept; a tail of exactly that many is left whole
+    #[test]
+    fn a_refused_imports_tail_is_capped() {
+        let head = "; why: ";
+        let exact = notes(&[&"a".repeat(IMPORT_TAIL_LONGEST - head.len())]);
+        let tail = import_refusal_tail(&exact, None).unwrap_or_default();
+        assert_eq!(tail.chars().count(), IMPORT_TAIL_LONGEST);
+        assert!(!tail.ends_with("..."), "left whole");
+        let over = notes(&[&"a".repeat(IMPORT_TAIL_LONGEST - head.len() + 1)]);
+        let tail = import_refusal_tail(&over, None).unwrap_or_default();
+        assert_eq!(tail.chars().count(), IMPORT_TAIL_LONGEST);
+        assert!(tail.starts_with("; why: aaa") && tail.ends_with("aaa..."));
+        // Two-byte characters: the cut lies between characters, never inside one.
+        let wide = notes(&[&"\u{e9}".repeat(2 * IMPORT_TAIL_LONGEST)]);
+        let tail = import_refusal_tail(&wide, Some("P1 ok")).unwrap_or_default();
+        assert_eq!(tail.chars().count(), IMPORT_TAIL_LONGEST);
+        assert!(tail.ends_with("\u{e9}..."));
+        // The notes the runtime keeps, four of its longest, and a long probe, fit the cap or are
+        // cut to it, never past it.
+        let longest = "x".repeat(399);
+        let four = notes(&[&longest, &longest, &longest, &longest]);
+        let probe = "p".repeat(600);
+        let tail = import_refusal_tail(&four, Some(&probe)).unwrap_or_default();
+        assert_eq!(tail.chars().count(), IMPORT_TAIL_LONGEST);
+        assert!(tail.ends_with("..."));
+    }
+
+    /// An import the runtime refuses (a page the process maps read-only, which Linux drivers
+    /// cannot pin for writing) dies with a line that names the check that refused it and its
+    /// numbers, after the refusal's own text; the notes are taken once, so the same refusal's
+    /// line asked again names none, and the next refusal of an import made no note names none
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_line_of_a_refused_import_names_the_check_that_refused_it() {
+        use std::ptr::NonNull;
+        let device = rt::Device::system_default_with(crate::platform::device_options()).unwrap();
+        let len = 0x4000;
+        // SAFETY: a new private mapping, which this test unmaps before it ends.
+        let at = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                len,
+                libc::PROT_READ,
+                libc::MAP_PRIVATE | libc::MAP_ANON,
+                -1,
+                0,
+            )
+        };
+        assert_ne!(at, libc::MAP_FAILED);
+        drop(rt::take_host_import_notes());
+        // SAFETY: the pages are mapped, and stay so until this test unmaps them after the call,
+        // which is refused (the buffer is never made).
+        let made = unsafe {
+            device.new_buffer_with_bytes_no_copy(
+                rt::HostMemory::new(NonNull::new(at.cast()).unwrap()),
+                len as u64,
+                rt::ResourceOptions::shared(),
+                None,
+            )
+        };
+        // SAFETY: the mapping made above, which no buffer holds.
+        unsafe { libc::munmap(at, len) };
+        let refused = made.err().unwrap();
+        let line = refusal(&refused);
+        let (head, why) = line.split_once("; why: ").unwrap();
+        assert!(
+            head.starts_with("the Vulkan runtime refused it: "),
+            "{line}"
+        );
+        assert!(
+            why.starts_with("host import refused at unwritable: window 0x"),
+            "{line}"
+        );
+        assert!(!line.contains('\n'), "{line}");
+        let again = refusal(&refused);
+        assert!(!again.contains("why: "), "taken once: {again}");
+        assert_eq!(again, head);
+    }
+
+    /// A refusal of host memory or of memory that no check of an import made a note for, on a
+    /// thread that made none, keeps its line as it was: no `why`, whichever probe there is. Run on a
+    /// thread of its own, whose notes are its own
+    #[test]
+    fn a_refusal_with_no_note_of_an_import_is_unchanged() {
+        use metal2vulkan::error::{Feature, Unsupported};
+        let on_a_thread = || {
+            assert!(host_import_notes(&Error::DeviceLost).is_empty());
+            let format = Error::Unsupported(Unsupported::not_implemented(Feature::Format));
+            assert!(host_import_notes(&format).is_empty());
+            // No note was made on this thread: taken, there are none, as the line then adds
+            // nothing.
+            let host = Error::Unsupported(Unsupported::not_representable(Feature::HostMemory));
+            assert!(host_import_notes(&host).is_empty());
+            let line = refusal(&host);
+            assert!(
+                line.starts_with("the Vulkan runtime refused it: "),
+                "{line}"
+            );
+            assert!(!line.contains("why: "), "{line}");
+            let memory = Error::OutOfMemory(metal2vulkan_runtime::MemoryKind::Device);
+            assert!(host_import_notes(&memory).is_empty());
+        };
+        std::thread::scope(|s| s.spawn(on_a_thread).join().unwrap());
     }
 }
