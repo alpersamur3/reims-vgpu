@@ -193,7 +193,117 @@ fn made_devices(
         // acquires it), and read after it.
         BELOW_HOST.store(true, Ordering::Relaxed);
     }
+    #[cfg(unix)]
+    probe_host_imports(&made);
     made
+}
+
+/// The environment variable that asks for the import probe ([`probe_host_imports`]): `1`.
+#[cfg(unix)]
+const IMPORT_PROBE_VAR: &str = "REIMS_VGPU_IMPORT_PROBE";
+
+/// The one line the import probe was kept as ([`summarize_probe`]), set once the probe has run.
+static IMPORT_PROBE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// What the import probe found of the process's first device, as [`summarize_probe`] says it, for
+/// the line of a refused import ([`crate::answer::refusal`]): `None` where the probe was not asked
+/// for (`REIMS_VGPU_IMPORT_PROBE=1`), has not run yet, or the OS has none (it maps memory with
+/// `mmap`, so Unix only).
+pub(crate) fn import_probe_summary() -> Option<&'static str> {
+    IMPORT_PROBE.get().map(String::as_str)
+}
+
+/// Where `REIMS_VGPU_IMPORT_PROBE=1`, asks the first device `made` makes what its driver takes of
+/// the shapes of host memory a guest's no-copy buffers are made of (`Device::probe_host_import`),
+/// once per process: a line of the log for each line the probe answers, and the compact summary
+/// kept for the line of a refused import ([`import_probe_summary`]). It exists for a machine nobody
+/// can run a debugger on, a phone whose driver refuses an import for a reason only the device
+/// knows: asked for nothing, it costs the environment lookup. The probe makes its own mappings and
+/// buffers and drops them before it returns, and never panics (the runtime's contract), so it is
+/// not caught: this crate's conventions leave `catch_unwind` to the testkit, the isolation trap
+/// and the C API.
+#[cfg(unix)]
+fn probe_host_imports(made: &[rt::Device]) {
+    if std::env::var_os(IMPORT_PROBE_VAR).is_none_or(|value| value != "1") {
+        return;
+    }
+    let Some(device) = made.first() else {
+        return;
+    };
+    IMPORT_PROBE.get_or_init(|| {
+        let lines = device.probe_host_import();
+        for line in &lines {
+            log::info!(target: "reims_vgpu_vulkan::platform", "import probe: {line}");
+        }
+        summarize_probe(&lines)
+    });
+}
+
+/// The lines of the import probe (`Device::probe_host_import`) as one: the device's import
+/// alignment and its memory types from the facts line (`alignment=0x1000 types=[0:0x1 1:0x7]`),
+/// then each shape's answer, `P3 ok`, `P4 refused@binding` (the check that refused it, the word
+/// after `refused at ` in the shape's first note, `?` where it has none) or `P5 error`, separated by
+/// `; `. A facts line with neither value (a device that imports no host memory) is kept as it
+/// says, cut at 200 characters, so the summary still says why; no facts line leaves the shapes
+/// alone, and no line an empty summary.
+#[cfg(any(unix, test))]
+fn summarize_probe(lines: &[String]) -> String {
+    let mut parts = Vec::new();
+    let facts = lines.iter().find_map(|line| line.strip_prefix("facts:"));
+    if let Some(facts) = facts {
+        let alignment = (facts.split_whitespace())
+            .find(|word| word.starts_with("alignment="))
+            .map(str::to_owned);
+        let types = facts.find("types=[").and_then(|from| {
+            let rest = facts.get(from..)?;
+            let to = rest.find(']')?;
+            rest.get(..=to).map(str::to_owned)
+        });
+        match (alignment, types) {
+            (None, None) => {
+                let said: String = facts.trim().chars().take(200).collect();
+                if !said.is_empty() {
+                    parts.push(said);
+                }
+            }
+            (alignment, types) => {
+                let both: Vec<String> = alignment.into_iter().chain(types).collect();
+                parts.push(both.join(" "));
+            }
+        }
+    }
+    for line in lines {
+        let Some((id, rest)) = line.split_once(' ') else {
+            continue;
+        };
+        let shape = id
+            .strip_prefix('P')
+            .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()));
+        if !shape {
+            continue;
+        }
+        let Some((_, status)) = rest.split_once(": ") else {
+            parts.push(format!("{id} ?"));
+            continue;
+        };
+        if status == "ok" {
+            parts.push(format!("{id} ok"));
+        } else if let Some(notes) = status.strip_prefix("refused: ") {
+            let stage = (notes.split_once("refused at ").map(|(_, after)| after))
+                .map(|after| {
+                    (after.chars())
+                        .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+                        .collect::<String>()
+                })
+                .filter(|stage| !stage.is_empty());
+            parts.push(format!("{id} refused@{}", stage.as_deref().unwrap_or("?")));
+        } else if status.starts_with("error") {
+            parts.push(format!("{id} error"));
+        } else {
+            parts.push(format!("{id} ?"));
+        }
+    }
+    parts.join("; ")
 }
 
 /// Whether the runtime announced that its devices answer as a release below the host's
@@ -982,6 +1092,119 @@ pub(crate) mod tests {
     fn the_shader_cache_holds_25_gib() {
         assert_eq!(rt::DEFAULT_CAPACITY, 25 << 30);
         assert_eq!(device_options().shader_cache.capacity, 1 << 30);
+    }
+
+    fn probe(lines: &[&str]) -> String {
+        let lines: Vec<String> = lines.iter().map(|&line| line.to_owned()).collect();
+        summarize_probe(&lines)
+    }
+
+    const FACTS: &str = "facts: page=0x4000 alignment=0x1000 dma_buf=false types=[0:0x1 1:0x7]";
+
+    /// The probe's lines are one: the facts' alignment and memory types, then each shape as `ok`,
+    /// `refused@<the check>` or `error`, in the probe's order, separated by `; `
+    #[test]
+    fn the_import_probe_is_summarized_on_one_line() {
+        let summary = probe(&[
+            FACTS,
+            "P1 anonymous private, 64 KiB aligned: ok",
+            "P2 anonymous private, pointer 0x2000 into a mapping: refused: host import refused at \
+             alignment: pointer 0x2000 unit 0x4000",
+            "P3 one memfd mapping, shared: refused: host import refused at binding: offset 0x0 \
+             | host import refused at window: start 0x1000",
+            "P4 13 memfd mappings of 16 KiB, reversed runs: error: the shape was not made: \
+             Invalid argument (os error 22)",
+            "P5 P3's pages mapped again, P3's buffer alive: refused: (no note was made)",
+            "P6 P3+0x4000 for 0x30000, P3's buffer alive: ok",
+        ]);
+        assert_eq!(
+            summary,
+            "alignment=0x1000 types=[0:0x1 1:0x7]; P1 ok; P2 refused@alignment; \
+             P3 refused@binding; P4 error; P5 refused@?; P6 ok"
+        );
+    }
+
+    /// A shape's check is the word after `refused at ` in its first note, with the dash and
+    /// underscore a check's name has; a refusal with a text that has none, or a status of no known
+    /// kind, is `?`
+    #[test]
+    fn a_refusals_check_is_named_by_its_first_note() {
+        let refused = |notes: &str| probe(&[&format!("P3 a shape: refused: {notes}")]);
+        assert_eq!(
+            refused("host import refused at pointer-types: mask 0x6"),
+            "P3 refused@pointer-types"
+        );
+        assert_eq!(
+            refused("host import refused at max-allocation: 0x34000 > 0x1000"),
+            "P3 refused@max-allocation"
+        );
+        assert_eq!(
+            refused("host import refused at dma-buf: no | host import refused at bind: x"),
+            "P3 refused@dma-buf"
+        );
+        assert_eq!(refused("something else"), "P3 refused@?");
+        assert_eq!(refused("host import refused at : empty"), "P3 refused@?");
+        assert_eq!(probe(&["P8 a shape: unheard of"]), "P8 ?");
+        assert_eq!(probe(&["P8 a shape without a status"]), "P8 ?");
+    }
+
+    /// The facts line gives its alignment and types and nothing else; one with neither, a device
+    /// that imports no host memory, is kept as it says; no facts line leaves the shapes, and no
+    /// line nothing. Lines that are neither the facts nor a shape's are not in it
+    #[test]
+    fn the_import_probes_facts_are_the_alignment_and_the_types() {
+        assert_eq!(probe(&[FACTS]), "alignment=0x1000 types=[0:0x1 1:0x7]");
+        assert_eq!(
+            probe(&["facts: page=0x1000 alignment=0x10000 dma_buf=true types=[]"]),
+            "alignment=0x10000 types=[]"
+        );
+        assert_eq!(probe(&["facts: alignment=0x40"]), "alignment=0x40");
+        assert_eq!(
+            probe(&["facts: page=0x1000 types=[2:0x5"]),
+            "page=0x1000 types=[2:0x5",
+            "an unclosed list is no types"
+        );
+        assert_eq!(
+            probe(&["facts: the device imports no host memory: NoHostImport"]),
+            "the device imports no host memory: NoHostImport"
+        );
+        assert_eq!(probe(&["facts:"]), "");
+        let long = format!("facts: {}", "w".repeat(500));
+        assert_eq!(probe(&[&long]).chars().count(), 200);
+        assert_eq!(
+            probe(&["P1 a: ok", "an unrelated line", "Pn b: ok", "P: c: ok"]),
+            "P1 ok",
+            "no facts line: the shapes alone"
+        );
+        assert_eq!(probe(&[]), "");
+    }
+
+    /// The real probe's lines (the runtime's, on this host's device) summarize as the format says:
+    /// the alignment and the memory types, then each of the eight shapes in order, or, for a device
+    /// that imports no host memory, the reason alone
+    #[cfg(unix)]
+    #[test]
+    fn the_runtimes_import_probe_is_summarized() {
+        let device = rt::Device::system_default_with(device_options()).unwrap();
+        let lines = device.probe_host_import();
+        let summary = summarize_probe(&lines);
+        assert!(!summary.contains(['\n', '\r']), "{summary}");
+        if lines.len() == 1 {
+            assert!(!summary.is_empty(), "{lines:?}");
+            return;
+        }
+        assert!(
+            summary.starts_with("alignment=0x") && summary.contains(" types=["),
+            "{lines:?} {summary}"
+        );
+        let shapes: Vec<&str> = (summary.split("; ").skip(1))
+            .map(|part| part.split(' ').next().unwrap_or_default())
+            .collect();
+        assert_eq!(
+            shapes,
+            ["P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8"],
+            "{lines:?} {summary}"
+        );
     }
 
     /// The services are the ones the platform was made with
