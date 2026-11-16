@@ -144,8 +144,11 @@ impl ImportView {
 ///
 /// `rt::HostMemory::new`'s contract, for the memory at `at`.
 pub(crate) unsafe fn host_memory(at: NonNull<u8>) -> rt::HostMemory {
-    // An earlier import's refusal is not this one's.
+    // An earlier import's refusal is not this one's: nor are the runtime's notes of the checks
+    // that refused it, which the thread keeps until they are taken (one a dma-buf source served,
+    // or a caller handled, is never taken), so a later death does not report them as its reasons.
     REFUSAL.with_borrow_mut(|kept| *kept = None);
+    drop(rt::take_host_import_notes());
     // A deferred view's bytes are gathered from the guest's RAM (`super::deferred`).
     if deferred::holds(at.as_ptr().addr().to_u64(), 1) {
         // SAFETY: the caller's; the source answers the view's pages, the guest's RAM, which the
